@@ -3,3 +3,5 @@ dataset/
 dataset/origin_data/
 dataset/processed_data/
 dataset/visualizations/
+*.pyc
+__pycache__/
