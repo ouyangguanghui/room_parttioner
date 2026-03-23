@@ -1,0 +1,12 @@
+FROM public.ecr.aws/lambda/python:3.10
+
+RUN yum install -y mesa-libGL glib2 && yum clean all
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app/ ${LAMBDA_TASK_ROOT}/app/
+COPY config/ ${LAMBDA_TASK_ROOT}/config/
+
+# Lambda handler: app.handler.handler
+CMD ["app.handler.handler"]

@@ -1,0 +1,18 @@
+services:
+  room-partitioner:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config:/app/config
+    restart: unless-stopped
+    environment:
+      - MIN_ROOM_AREA=1.0
+      - WALL_THRESHOLD=128
+      - RESOLUTION=0.05
+      - TRITON_URL=triton-server:8001
+      - MODEL_NAME=room_seg
+      - MODEL_VERSION=
+      - TRITON_PROTOCOL=grpc
+      - INPUT_NAME=input
+      - OUTPUT_NAME=output
