@@ -5,3 +5,5 @@ dataset/processed_data/
 dataset/visualizations/
 *.pyc
 __pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
