@@ -37,15 +37,17 @@ class Preprocessor:
         self.dilate_iter: int = config.get("dilate_iter", 2)
         self.smooth_iterations: int = config.get("smooth_iterations", 2)
         self.max_burr_len: int = config.get("max_burr_len", 4)
+        self.target_size: int = config.get("target_size", [512, 512])
         self._save_viz: bool = config.get("save_viz", False)
         self._viz_dir: Optional[Path] = Path(config["viz_dir"]) if config.get("viz_dir") else None
+        
 
         # 预生成常用 kernel
         self._k3 = np.ones((3, 3), np.uint8)
         self._k5 = np.ones((5, 5), np.uint8)
 
     # ========== 核心处理流程 ==========
-    def process(self, img: np.ndarray) -> np.ndarray:
+    def process(self, img: np.ndarray) -> Dict[str, Any]:
         """
         完整前处理流程
 
@@ -53,43 +55,45 @@ class Preprocessor:
             img: 原始栅格地图 (H, W) uint8
 
         Returns:
-            处理后的地图
+            meta 字典:
+                "map_data":   补墙平滑后的地图 (H, W) uint8，用于自由空间判断和模型张量准备
+                "input_data": 去噪但未补墙的地图，作为自由空间判断的备用
         """
-        viz_data = {} 
+        viz_data = {}
         viz_status = True if self._viz_dir else False
 
-
-        # Step 0: 可选像素映射（如果输入像素值不符合预期）
-        img = self._map_pixels(img)  # 如果输入已经是标准像素值，则此步骤不会改变图像，但确保后续处理的一致性
+        # Step 0: 像素值标准化
+        img = self._map_pixels(img)
 
         # Step 1: 去除自由空间内部黑色噪点
         cleaned, noise_mask, stats1 = self.remove_interior_noise(img)
         logger.info("内部噪点: 移除 %d / 共 %d 个黑色连通域",
-                     stats1["removed"], stats1["total_black_components"])
-        logger.info(f"{viz_data is not None=}: {'保存可视化数据' if viz_data is not None else '不保存可视化数据'}")
+                    stats1["removed"], stats1["total_black_components"])
         if viz_status:
             viz_data["step1"] = (img, cleaned, noise_mask)
 
         # Step 2: 去除未知区域噪点
         cleaned2, unknown_mask, stats2 = self.remove_unknown_noise(cleaned)
         logger.info("未知噪点: 移除 %d / 共 %d 个未知连通域",
-                     stats2["removed"], stats2["total_unknown_components"])
+                    stats2["removed"], stats2["total_unknown_components"])
         if viz_status:
             viz_data["step2"] = (cleaned, cleaned2, unknown_mask)
 
         # Step 3: 补墙 + 平滑
         result, added_wall, stats3 = self.fill_and_smooth(cleaned2)
         logger.info("墙壁: 原始 %d px, 补充 %d px, 最终 %d px (净变化 %+d)",
-                     stats3["original_wall_pixels"], stats3["added_boundary_pixels"],
-                     stats3["final_wall_pixels"], stats3["net_change"])
+                    stats3["original_wall_pixels"], stats3["added_boundary_pixels"],
+                    stats3["final_wall_pixels"], stats3["net_change"])
         if viz_status:
             viz_data["step3"] = (cleaned2, result, added_wall)
 
-        # 可视化
         if viz_status and viz_data:
             self._save_visualization(viz_data)
 
-        return cleaned2, result
+        return {
+            "map_data": cleaned2,
+            "input_data": result,
+        }
 
     # ========== Step 1: 去除内部噪点 ==========
 

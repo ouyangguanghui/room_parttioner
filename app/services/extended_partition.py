@@ -59,7 +59,7 @@ class ExtendedPartitioner:
 
         适用于自动分区后边界附近的未标记像素
         """
-        free_space = grid_map < self.config.get("wall_threshold", 128)
+        free_space = grid_map >= self.config.get("wall_threshold", 128)
         unassigned = (label_map == 0) & free_space
 
         if not unassigned.any():
