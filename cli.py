@@ -1,19 +1,11 @@
 """RoomPartitioner CLI 入口"""
 
 import argparse
-import numpy as np
 import cv2
 
 from app.core.config import load_config
 from app.core.partitioner import RoomPartitioner
-
-
-def _label_to_color(label_map: np.ndarray) -> np.ndarray:
-    color_map = np.zeros((*label_map.shape, 3), dtype=np.uint8)
-    for lid in range(1, label_map.max() + 1):
-        color = np.random.RandomState(lid).randint(50, 255, 3).tolist()
-        color_map[label_map == lid] = color
-    return color_map
+from app.utils.image import label_to_color
 
 
 def main():
@@ -42,7 +34,7 @@ def main():
     label_map = partitioner.auto_partition(grid_map, extend=not args.no_extend)
     rooms = partitioner.get_room_info(config["resolution"])
 
-    cv2.imwrite(args.output, _label_to_color(label_map))
+    cv2.imwrite(args.output, label_to_color(label_map))
 
     print(f"划分完成，共 {len(rooms)} 个房间")
     for r in rooms:

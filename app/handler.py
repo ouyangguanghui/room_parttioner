@@ -23,6 +23,7 @@ import logging
 from botocore.exceptions import ClientError
 
 from app.core.editor import RoomEditor
+from app.core.errors import RoomPartitionerError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,30 +63,23 @@ def handler(event, context):
     editor = RoomEditor(bucket, key)
 
     try:
-        room_merge_list = event.get('roomMergeList', None)
-        division_croods_dict = event.get('divisionCroodsDict', None)
-
-        seg_state, labels_json = editor.room_edit(
-            detection=operation in ['split', 'repartition'],
-            repartition=operation == 'repartition',
-            division_croods_dict=division_croods_dict,
-            room_merge_list=room_merge_list,
+        labels_json = editor.room_edit(
+            operation=operation,
+            division_croods_dict=event.get('divisionCroodsDict'),
+            room_merge_list=event.get('roomMergeList'),
         )
 
-        # 格式化返回值 (与旧代码一致)
-        if not seg_state:
-            if isinstance(labels_json, int) and labels_json in range(1, 12):
-                body = str(labels_json)
-            else:
-                body = "0"
-        else:
-            body = json.dumps(labels_json, ensure_ascii=False)
-
         return {
-            'statusCode': 200 if seg_state else 190,
-            'body': body,
+            'statusCode': 200,
+            'body': json.dumps(labels_json, ensure_ascii=False),
         }
 
+    except RoomPartitionerError as e:
+        logger.error(f"业务错误 (code={e.code}): {e}")
+        return {
+            'statusCode': 190,
+            'body': str(e.code),
+        }
     except ClientError as e:
         logger.error(f"S3 错误: {e}")
         return {

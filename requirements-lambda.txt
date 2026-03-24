@@ -1,0 +1,6 @@
+numpy>=1.20
+opencv-python-headless>=4.5
+scipy>=1.7
+tritonclient[all]>=2.34
+pyyaml>=6.0
+boto3>=1.26

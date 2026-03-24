@@ -1,9 +1,12 @@
 """统一配置加载：yaml + 环境变量覆盖"""
 
 import os
+from pathlib import Path
 from typing import Dict, Any
 
 import yaml
+
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 
 
 _DEFAULT_CONFIG = {
@@ -58,7 +61,9 @@ def load_config(yaml_path: str = None, overrides: Dict[str, Any] = None) -> Dict
     config = dict(_DEFAULT_CONFIG)
 
     # 1. 从 yaml 加载
-    if yaml_path and os.path.exists(yaml_path):
+    if yaml_path is None:
+        yaml_path = str(_CONFIG_DIR / "default.yaml")
+    if os.path.exists(yaml_path):
         with open(yaml_path, "r") as f:
             yaml_config = yaml.safe_load(f) or {}
         config.update(yaml_config)

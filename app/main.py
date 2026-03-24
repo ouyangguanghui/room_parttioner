@@ -20,9 +20,11 @@ logger = logging.getLogger("room_partitioner")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时初始化，关闭时清理"""
-    config = load_config("config/default.yaml")
+    config = load_config()
     partitioner = RoomPartitioner(config)
-    routes.init(partitioner, config)
+    # 使用 app.state 保存运行时依赖，避免模块级全局变量带来的并发风险
+    app.state.partitioner = partitioner
+    app.state.config = config
     logger.info("RoomPartitioner 服务启动完成")
     logger.info("Triton: %s", config.get("triton_url") or "未配置 (fallback 模式)")
     yield

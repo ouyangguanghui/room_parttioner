@@ -6,26 +6,25 @@
 
 ```
 RoomPartitioner/
-├── main.py                          # CLI 入口
-├── server.py                        # FastAPI HTTP 服务
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
+├── cli.py                           # 命令行入口（自动分区并导出图片）
+├── app/
+│   ├── main.py                      # FastAPI（uvicorn app.main:app）
+│   ├── handler.py                   # Lambda handler（app.handler.handler）
+│   ├── api/                         # 路由层
+│   ├── core/                        # 核心编排/配置
+│   ├── services/                   # 分区/合并实现
+│   ├── pipeline/                   # 图像预处理/推理/后处理
+│   ├── schemas/                    # 请求模型（Pydantic）
+│   └── utils/                      # 坐标/图结构/序列化/S3 等
 ├── config/
 │   └── default.yaml
-├── src/
-│   ├── __init__.py
-│   ├── partitioner.py               # 核心编排（统一入口）
-│   ├── preprocessor.py              # 图像前处理
-│   ├── inferencer.py                # 模型推理（Triton 客户端调用）
-│   ├── triton_client.py             # Triton gRPC/HTTP 客户端封装
-│   ├── postprocessor.py             # 模型后处理
-│   ├── auto_partition.py            # 自动分区
-│   ├── extended_partition.py        # 扩展分区（门口检测/区域生长）
-│   ├── manual_partition.py          # 手动划分（画线/折线/多边形）
-│   └── manual_merge.py             # 手动合并
-└── tests/
-    └── test_partitioner.py
+├── tests/
+├── dataset/                        # 可选数据目录
+├── Dockerfile
+├── Dockerfile.lambda
+├── docker-compose.yml
+├── requirements.txt
+└── requirements-dev.txt
 ```
 
 ## 处理流程
