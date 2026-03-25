@@ -7,12 +7,24 @@ from shapely.geometry import LineString, Polygon  # type: ignore
 from shapely.ops import split as shp_split  # type: ignore
 
 
-def find_room_index_by_id(rooms_data: List[Dict[str, Any]], room_id: str) -> int:
-    """按房间 ID 查找索引，找不到返回 -1。"""
+
+def get_room_index_by_id(rooms_data: List[Dict[str, Any]], room_id: str) -> int:
+    """根据房间 ID 获取房间索引。"""
     for i, room in enumerate(rooms_data):
-        if room.get("id") == room_id:
+        if room["id"] == room_id:
             return i
     return -1
+
+
+def find_room_index_by_id(rooms_data: List[Dict[str, Any]], room_id: str) -> int:
+    """兼容旧命名：等价于 get_room_index_by_id。"""
+    return get_room_index_by_id(rooms_data, room_id)
+
+def split_labels_data(labels: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """分割房间数据和标记点数据。"""
+    rooms_data = [d for d in labels['data'] if 'ROOM' in d.get('id', '')]
+    landmarks_data = [d for d in labels['data'] if 'PLATFORM_LANDMARK' in d.get('id', '')]
+    return rooms_data, landmarks_data
 
 
 def next_room_id(rooms_data: List[Dict[str, Any]]) -> str:
@@ -26,16 +38,23 @@ def next_room_id(rooms_data: List[Dict[str, Any]]) -> str:
             max_idx = max(max_idx, int(rid.split("_")[-1]))
         except ValueError:
             continue
+    if max_idx >= 999:
+        raise ValueError("房间 ID 已达到上限 ROOM_999，无法继续分配")
     return f"ROOM_{max_idx + 1:03d}"
 
 
 def next_room_name(rooms_data: List[Dict[str, Any]]) -> str:
-    """分配下一个可用房间名 (A~Z)。"""
-    used = {r.get("name") for r in rooms_data}
-    name = chr(ord("A"))
-    while name in used:
-        name = chr(ord(name) + 1)
-    return name
+    """分配下一个可用房间名：A~Z，超出后 A1~Z1、A2~Z2..."""
+    used_names = {r.get("name") for r in rooms_data if isinstance(r.get("name"), str)}
+    letters = [chr(ord("A") + i) for i in range(26)]
+
+    suffix = 0
+    while True:
+        for letter in letters:
+            candidate = letter if suffix == 0 else f"{letter}{suffix}"
+            if candidate not in used_names:
+                return candidate
+        suffix += 1
 
 
 def flatten_geometry(poly_pts: List[Tuple[float, float]]) -> List[float]:
@@ -154,6 +173,7 @@ def _find_split_points_shapely(
         return False, "shapely exception"
 
 
+
 def find_split_points(
     A: Tuple[float, float],
     B: Tuple[float, float],
@@ -166,4 +186,3 @@ def find_split_points(
         (ok, (poly_a, poly_b, intersections)) 或 (False, message)
     """
     return _find_split_points_shapely(A, B, geometry)
-

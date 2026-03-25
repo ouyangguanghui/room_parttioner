@@ -139,6 +139,7 @@ class RoomGraph:
                               graph: Dict[int, List[int]],
                               current_colors: Dict[int, int]) -> int:
         """为单个房间分配颜色 (分割/合并后用)"""
+        
         neighbor_colors = {
             current_colors[nb] for nb in graph.get(room_idx, [])
             if nb in current_colors and current_colors[nb] is not None
@@ -196,7 +197,8 @@ class RoomGraph:
         return order
 
     def find_start_room(self, contours: List[np.ndarray],
-                        charge_point_pixel: Tuple[int, int]) -> int:
+                        charge_point_pixel: Tuple[int, int],
+                        max_area_start: bool = False) -> int:
         """
         从充电桩位置找到起始房间
 
@@ -207,6 +209,17 @@ class RoomGraph:
         Returns:
             起始房间索引
         """
+       # 如果charge_point_pixel为None，面积最大房间为起始房间
+        if max_area_start:
+            max_area = 0
+            start_room_idx = 0
+            for i, cnt in enumerate(contours):
+                area = cv2.contourArea(cnt)
+                if area > max_area:
+                    max_area = area
+                    start_room_idx = i
+            return start_room_idx
+
         pt = tuple(charge_point_pixel)
 
         # 先找包含充电桩的房间

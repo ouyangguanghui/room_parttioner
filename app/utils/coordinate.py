@@ -31,6 +31,12 @@ class CoordinateTransformer:
         self.origin = origin
         self.height = height
         self.offset = offset
+    
+    def set_params(self, resolution: float, origin: List[float], height: int):
+        """设置坐标转换器参数。"""
+        self.resolution = resolution
+        self.origin = origin
+        self.height = height
 
     def pixel_to_world(self, px: int, py: int) -> Tuple[float, float]:
         """单个像素坐标 → 世界坐标"""
@@ -81,6 +87,12 @@ class CoordinateTransformer:
                 seen.add(key)
                 unique.append(p)
         return np.array(unique, dtype=np.int32).reshape(-1, 1, 2)
+    
+    def rooms_data_to_contours(self, rooms_data: List[Dict[str, Any]]) -> List[np.ndarray]:
+        """
+        房间数据 → 轮廓列表
+        """
+        return [self.world_to_contour(room['geometry']) for room in rooms_data]
 
     def contour_to_geometry(self, contour: np.ndarray, clockwise: bool = True) -> List[float]:
         """
