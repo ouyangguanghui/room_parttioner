@@ -7,6 +7,3 @@ dataset/visualizations/
 __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
-tests/verify_step1_preprocess.py
-tests/*
-./tests/
