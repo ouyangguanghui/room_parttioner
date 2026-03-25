@@ -1,110 +1,314 @@
-"""手动划分模块"""
+"""手动划分模块（重构中间态：world-only）。
 
+当前阶段仅保留世界坐标(world)分割流程，作为模块内重构的中间态：
+    - 入口：process(labels, division_croods_dict, map_img)
+    - 核心：split_room(...)
+
+注意：
+    RoomPartitioner 主调用链仍在后续阶段统一适配，届时再决定是否恢复
+    pixel 接口或将其职责下沉到图/美化/平台点模块内部。
+"""
+
+import logging
 from typing import Dict, Any, List, Tuple
+from shapely.geometry import Polygon
+
 import numpy as np
-import cv2
+
+from app.utils.coordinate import CoordinateTransformer
+from app.utils.graph import RoomGraph
+from app.utils.landmark import LandmarkManager
+from app.core.errors import (
+    InvalidParameterError,
+    InsufficientIntersectionsError,
+    RoomIndexOutOfRangeError,
+    RoomTooSmallError,
+)
+from app.utils.geometry_ops import (
+    get_room_index_by_id,
+    split_labels_data,
+    next_room_id,
+    next_room_name,
+    flatten_geometry,
+    find_split_points,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ManualPartitioner:
     """
-    手动划分：用户指定分割线或区域，手动拆分房间
-
-    支持的操作：
-    - 画线分割：指定两点画分割线，将一个房间拆为两个
-    - 多边形划分：指定多边形区域，标记为新房间
-    - 点选分割：指定分割点序列，沿路径切割
+    手动划分（world-only 中间态）：
+    用户指定世界坐标分割线，拆分 labels_json 中的目标房间。
     """
 
     def __init__(self, config: Dict[str, Any] = None):
         self.config = config or {}
-        self.line_thickness = self.config.get("line_thickness", 3)
+        self.line_thickness = self.config.get("line_thickness", 1)
+        self.beautifier_status = False
 
-    def split_by_line(
+
+    def set_beautifier_status(self, status: bool):
+        self.beautifier_status = status
+
+    def _extract_split_params(
         self,
-        label_map: np.ndarray,
-        pt1: Tuple[int, int],
-        pt2: Tuple[int, int],
-    ) -> np.ndarray:
+        rooms_data: List[Dict[str, Any]],
+        division_croods_dict: Dict[str, Any],
+    ) -> Tuple[int, List[Any], List[Any]]:
         """
-        画线分割：在两点之间画线，将被切割的房间拆分
+        校验分割参数并提取目标房间索引与分割点。
+        """
+        if not isinstance(division_croods_dict, dict):
+            raise InvalidParameterError("division_croods_dict 必须是 dict")
+        for k in ("id", "A", "B"):
+            if k not in division_croods_dict:
+                raise InvalidParameterError(f"缺少参数: {k}")
 
+        A = division_croods_dict["A"]
+        B = division_croods_dict["B"]
+        room_id = division_croods_dict["id"]
+
+        if not isinstance(A, list) or not isinstance(B, list):
+            raise InvalidParameterError("A/B 必须是列表")
+        if len(A) != 2 or len(B) != 2:
+            raise InvalidParameterError("A/B 必须是 [x, y]")
+        if not isinstance(room_id, str):
+            raise InvalidParameterError("id 必须是字符串")
+
+        target_room_idx = get_room_index_by_id(rooms_data, room_id)
+        if target_room_idx < 0:
+            raise RoomIndexOutOfRangeError()
+
+        return target_room_idx, A, B
+
+    def split_room(
+        self,
+        rooms_data: List[Dict[str, Any]],
+        target_room_idx: int,
+        A: List[float],
+        B: List[float],
+    ) -> List[Dict[str, Any]]:
+        """
+        房间分割： 根据用户指定的分割线和房间ID，将房间拆分为两个房间。并更新房间数据。
         Args:
-            label_map: 当前标签图
-            pt1: 起点 (x, y)
-            pt2: 终点 (x, y)
+            rooms_data: 房间数据列表
+            target_room_idx: 目标房间索引
+            A: 分割线起点
+            B: 分割线终点
+            map_img: 地图图像
 
         Returns:
-            更新后的标签图
+            Tuple[List[Dict[str, Any]], int]: 更新后的房间数据列表和新增房间的索引
         """
-        result = label_map.copy()
-        next_label = result.max() + 1
 
-        # 在线段经过位置设为 0（切断）
-        cut_mask = np.zeros(result.shape[:2], dtype=np.uint8)
-        cv2.line(cut_mask, pt1, pt2, 1, self.line_thickness)
+        geometry = rooms_data[target_room_idx]['geometry']
+        if not geometry or len(geometry) < 8:
+            raise InvalidParameterError("目标房间 geometry 非法")
+        ok, result = find_split_points(A, B, geometry)
+        if not ok:
+            raise InsufficientIntersectionsError()
 
-        # 找出被线段穿过的所有房间ID
-        affected_ids = set(result[cut_mask > 0].flatten())
-        affected_ids.discard(0)
+        poly_a, poly_b, _ = result
 
-        # 将切割线设为背景
-        result[cut_mask > 0] = 0
+        area_a = float(Polygon(poly_a).area)
+        area_b = float(Polygon(poly_b).area)
+        if area_a < 0.25 or area_b < 0.25:
+            raise RoomTooSmallError()
 
-        # 对每个受影响的房间重新连通域标记
-        for lid in affected_ids:
-            mask = (result == lid).astype(np.uint8)
-            num, sub_labels = cv2.connectedComponents(mask)
-            if num <= 2:
+        geom_a = flatten_geometry(poly_a)
+        geom_b = flatten_geometry(poly_b)
+
+        new_id = next_room_id(rooms_data)
+        new_name = next_room_name(rooms_data)
+
+        if area_a >= area_b:
+            rooms_data[target_room_idx]['geometry'] = geom_a
+            rooms_data.append({
+                "name": new_name,
+                "id": new_id,
+                "type": rooms_data[target_room_idx].get('type', 'polygon'),
+                "geometry": geom_b,
+                "colorType": rooms_data[target_room_idx].get('colorType', None),
+                "graph": None,
+                "groundMaterial": rooms_data[target_room_idx].get('groundMaterial', None),
+            })
+        else:
+            rooms_data[target_room_idx]['geometry'] = geom_b
+            rooms_data.append({
+                "name": new_name,
+                "id": new_id,
+                "type": rooms_data[target_room_idx].get('type', 'polygon'),
+                "geometry": geom_a,
+                "colorType": rooms_data[target_room_idx].get('colorType', None),
+                "graph": None,
+                "groundMaterial": rooms_data[target_room_idx].get('groundMaterial', None),
+            })
+
+        return rooms_data
+
+    # 邻接图 + 五色地图
+    def build_graph_and_colors(self, 
+                                rooms_data: List[Dict[str, Any]],
+                                transformer: CoordinateTransformer,
+                                graph_builder: RoomGraph,
+                                map_img: np.ndarray,
+                                target_room_idx: int,
+                                ) -> Tuple[List[Dict[str, Any]], List[np.ndarray], Dict[int, List[int]]]:
+        """
+        构建邻接图和五色地图
+        """
+        # 构建邻接图
+        contours_list = transformer.rooms_data_to_contours(rooms_data)
+        graph = graph_builder.build_graph(contours_list, map_img)
+        
+        for room_idx in range(len(rooms_data)):
+            # 打印一下graph是否有变化
+            logger.info(f">>>> room_idx : {room_idx}, original graph: {rooms_data[room_idx]['graph']}, new graph: {graph[room_idx]}")
+            rooms_data[room_idx]["graph"] = graph[room_idx]
+        
+        # 着色
+        # 取出所有房间的colorType
+        current_colors = {room_idx: rooms_data[room_idx]["colorType"] for room_idx in range(len(rooms_data))}
+        if rooms_data[target_room_idx]["colorType"] is None:
+            rooms_data[target_room_idx]["colorType"] = graph_builder.assign_color_for_room(target_room_idx, graph, current_colors)
+        if rooms_data[-1]["colorType"] is None:
+            rooms_data[-1]["colorType"] = graph_builder.assign_color_for_room(-1, graph, current_colors)
+        return rooms_data, contours_list, graph
+
+
+    def build_landmarks(
+        self,
+        landmarks_data: List[Dict[str, Any]],
+        rooms_data: List[Dict[str, Any]],
+        new_rooms_data: List[Dict[str, Any]],
+        target_room_idx: int,
+        graph: Dict[int, List[int]],
+        contours_list: List[np.ndarray],
+        world_charge_pose: List[float],
+        transformer: CoordinateTransformer,
+        graph_builder: RoomGraph,
+        landmark_builder: LandmarkManager,
+    ) -> List[Dict[str, Any]]:
+        """
+        构建平台点标记点
+        """
+        world_charge_pixel = transformer.world_to_pixel(world_charge_pose[0], world_charge_pose[1])
+        start_room_idx = graph_builder.find_start_room(
+            contours_list, world_charge_pixel, max_area_start=True
+        )
+        room_order = graph_builder.dfs_sort(graph, start_room_idx)
+
+        # 兜底：确保每个房间都会被遍历到
+        if not room_order:
+            room_order = list(range(len(new_rooms_data)))
+        else:
+            missing = [idx for idx in range(len(new_rooms_data)) if idx not in room_order]
+            room_order.extend(missing)
+
+        old_landmarks_by_room = {}
+        for landmark in landmarks_data:
+            room_id = landmark.get("roomId")
+            if room_id:
+                old_landmarks_by_room.setdefault(room_id, []).append(landmark)
+
+        new_landmarks_data = []
+        for new_room_idx, old_room_idx in enumerate(room_order):
+            old_room_id = rooms_data[old_room_idx]["id"]
+            matched_landmarks = old_landmarks_by_room.get(old_room_id, [])
+            if matched_landmarks and (
+                old_room_idx != target_room_idx and old_room_idx != (len(rooms_data) - 1)
+            ):
+                for landmark in matched_landmarks:
+                    new_landmarks_data.append({
+                        "geometry": landmark["geometry"],
+                        "id": f"PLATFORM_LANDMARK_{len(new_landmarks_data) + 1:03d}",
+                        "roomId": new_rooms_data[new_room_idx]["id"],
+                        "name": new_rooms_data[new_room_idx]["name"],
+                        "type": "pose",
+                    })
                 continue
-            # 保留最大连通域为原ID，其余分配新ID
-            sizes = [(sub_labels == i).sum() for i in range(1, num)]
-            keep_sub = np.argmax(sizes) + 1
-            for sub_id in range(1, num):
-                if sub_id == keep_sub:
-                    continue
-                result[sub_labels == sub_id] = next_label
-                next_label += 1
 
-        return result
+            markers_polygons = []  # TODO: 接入家具/标记物多边形避障
+            new_pose = landmark_builder._find_center(
+                new_rooms_data[new_room_idx]["geometry"],
+                markers_polygons,
+            )
+            new_pose = [new_pose[0], new_pose[1], 0]
+            new_landmarks_data.append({
+                "geometry": new_pose,
+                "id": f"PLATFORM_LANDMARK_{len(new_landmarks_data) + 1:03d}",
+                "roomId": new_rooms_data[new_room_idx]["id"],
+                "name": new_rooms_data[new_room_idx]["name"],
+                "type": "pose",
+            })
 
-    def split_by_polyline(
-        self,
-        label_map: np.ndarray,
-        points: List[Tuple[int, int]],
-    ) -> np.ndarray:
+        return new_landmarks_data
+    def process(self, 
+                map_data: Dict[str, Any],
+                division_croods_dict: Dict,
+                transformer: CoordinateTransformer,
+                graph_builder: RoomGraph,
+                landmark_builder: LandmarkManager,
+
+    ) -> Dict[str, Any]:
         """
-        多段线分割：沿多个点的折线切割
-
+        处理房间数据：根据用户指定的分割线或区域，手动拆分房间。
         Args:
-            label_map: 当前标签图
-            points: 折线顶点列表 [(x1,y1), (x2,y2), ...]
+            map_data: 地图数据
+                "map_img": 地图图像 (H, W, 3) uint8
+                "resolution": 地图分辨率 float
+                "origin": 地图原点 [x, y] float
+                "labels_json": 房间标注数据 json
+                "robot_model": 机器人型号 str
+                "uuid": 机器人 UUID str
+                "markers_json": 标记信息 json
+                "world_charge_pose": 充电桩世界坐标 [x, y, z] float
+                
+            division_croods_dict: 分割线坐标字典
+            transformer: 坐标变换器
+            graph_builder: 邻接图构建器
+        Returns:
+            List[Dict[str, Any]]: 更新后的房间数据列表
         """
-        result = label_map.copy()
-        for i in range(len(points) - 1):
-            result = self.split_by_line(result, points[i], points[i + 1])
-        return result
+        # step1 分割房间数据和标记点数据
+        rooms_data, landmarks_data = split_labels_data(map_data["labels_json"])
 
-    def assign_polygon(
-        self,
-        label_map: np.ndarray,
-        polygon: List[Tuple[int, int]],
-        room_id: int = -1,
-    ) -> np.ndarray:
-        """
-        多边形划分：将指定多边形区域标记为新房间
+        # step2 校验参数并提取目标房间与分割线端点
+        target_room_idx, A, B = self._extract_split_params(rooms_data, division_croods_dict)
 
-        Args:
-            label_map: 当前标签图
-            polygon: 多边形顶点列表
-            room_id: 指定房间ID，-1 表示自动分配新ID
-        """
-        result = label_map.copy()
-        if room_id == -1:
-            room_id = result.max() + 1
+        # step3 对目标房间进行分割
+        new_rooms_data = self.split_room(rooms_data, target_room_idx, A, B)
 
-        mask = np.zeros(result.shape[:2], dtype=np.uint8)
-        pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
-        cv2.fillPoly(mask, [pts], 1)
+        # step4 邻接图 + 五色地图
+        new_rooms_data, contours_list, graph = self.build_graph_and_colors(new_rooms_data, 
+                                                                            transformer, 
+                                                                            graph_builder, 
+                                                                            map_data["map_img"], 
+                                                                            target_room_idx)
 
-        result[mask > 0] = room_id
-        return result
+        # step5 美化框
+        if self.beautifier_status:
+            pass # TODO: 美化框
+
+        # step6 平台点标记点
+        new_landmarks_data = self.build_landmarks(
+            landmarks_data=landmarks_data,
+            rooms_data=rooms_data,
+            target_room_idx=target_room_idx,
+            new_rooms_data=new_rooms_data,
+            graph=graph,
+            contours_list=contours_list,
+            world_charge_pose=map_data["world_charge_pose"],
+            transformer=transformer,
+            graph_builder=graph_builder,
+            landmark_builder=landmark_builder,
+        )
+        
+        logger.info(f">>>> old rooms number: {len(rooms_data)}, new rooms number: {len(new_rooms_data)}")
+        logger.info(f">>>> old landmarks number: {len(landmarks_data)}, new landmarks number: {len(new_landmarks_data)}")
+            
+        # step7 回写结果（先保持原始顺序：ROOM + LANDMARK）
+        labels = {"version": "online_4.0.2", "uuid": map_data["uuid"], "data": new_rooms_data + new_landmarks_data}
+    
+        return labels
