@@ -69,3 +69,25 @@ docker compose up -d
 | `RESOLUTION` | `0.05` | 地图分辨率 m/pixel |
 | `TARGET_SIZE` | `512,512` | 模型输入尺寸 |
 | `DOOR_WIDTH` | `20` | 门口宽度阈值(像素) |
+| `ROOM_PARTITIONER_DEBUG` | `0` | 调试模式开关（`1/true/yes/on` 表示启用本地数据模式） |
+| `ROOM_PARTITIONER_LOCAL_DIR` | (空) | 调试模式本地数据目录，需包含 `saved_map.png`/`saved_map.json` |
+
+## 本地调试模式（跳过 S3）
+
+当需要在本地快速调试时，可让 `S3DataLoader` 直接从本地目录读取，不访问 S3：
+
+```bash
+export ROOM_PARTITIONER_DEBUG=1
+export ROOM_PARTITIONER_LOCAL_DIR=/path/to/case_dir
+```
+
+本地目录应至少包含：
+
+- `saved_map.png`
+- `saved_map.json`
+
+可选文件：
+
+- `labels.json`
+- `mapinfo.json`
+- `markers.json`（K20 机型）
