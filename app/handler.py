@@ -1,5 +1,5 @@
 """
-AWS Lambda Handler —— 与旧 app.py handler 签名完全一致
+AWS Lambda Handler
 
 入参:
     event = {
