@@ -7,3 +7,5 @@ dataset/visualizations/
 __pycache__/
 .pytest_cache/
 .ipynb_checkpoints/
+./gt_map_data/
+gt_map_data/
