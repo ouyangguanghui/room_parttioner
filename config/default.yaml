@@ -24,6 +24,9 @@ resolution: 0.05              # 地图分辨率 (m/pixel)
 # ---- 扩展分区 ----
 door_width: 20                # 门口宽度阈值 (像素)
 grow_iterations: 10           # 区域生长迭代次数
+merge_area_threshold: 0       # 新区域面积低于此值时合并到相邻房间 (m²), 0 表示使用 min_room_area
+merge_ratio_threshold: 0.6    # 接触边占新区域周长比例阈值, 超过则合并
+min_new_region_area: 50       # 新区域最小面积 (像素), 低于此直接丢弃
 
 # ---- 手动划分 ----
 line_thickness: 3             # 分割线粗细 (像素)
