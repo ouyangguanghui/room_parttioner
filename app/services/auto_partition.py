@@ -29,9 +29,9 @@ class AutoPartitioner:
 
         self.wall_threshold = self.config.get("wall_threshold", 128)
 
-    def run(self, image: np.ndarray) -> np.ndarray:
+    def partition_pixel(self, image: np.ndarray) -> np.ndarray:
         """
-        自动分区
+        像素级自动分区主入口。
 
         Args:
             image: 原始栅格地图 (H, W) 灰度图
@@ -48,6 +48,10 @@ class AutoPartitioner:
             label_map = self._fallback_partition(image)
 
         return label_map
+
+    def run(self, image: np.ndarray) -> np.ndarray:
+        """兼容旧接口：等价于 partition_pixel。"""
+        return self.partition_pixel(image)
 
     def _prepare_tensor(
         self,
@@ -117,7 +121,7 @@ class AutoPartitioner:
         free = (meta["map_data"] >= 200).astype(np.uint8)
         _, labels = cv2.connectedComponents(free, connectivity=8)
         labels = labels.astype(np.int32)
-        normal_map, small_map = self.postprocessor._split_by_area(labels)
+        normal_map, small_map = self.postprocessor._split_by_area(labels, meta["map_data"])
         labels = self.postprocessor._merge_fragments(normal_map, small_map)
         return labels
 

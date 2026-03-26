@@ -1,12 +1,8 @@
-"""手动划分模块（重构中间态：world-only）。
+"""手动划分模块。
 
 当前阶段仅保留世界坐标(world)分割流程，作为模块内重构的中间态：
     - 入口：process(labels, division_croods_dict, map_img)
     - 核心：split_room(...)
-
-注意：
-    RoomPartitioner 主调用链仍在后续阶段统一适配，届时再决定是否恢复
-    pixel 接口或将其职责下沉到图/美化/平台点模块内部。
 """
 
 import logging
@@ -38,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class ManualPartitioner:
     """
-    手动划分（world-only 中间态）：
+    手动划分：
     用户指定世界坐标分割线，拆分 labels_json 中的目标房间。
     """
 

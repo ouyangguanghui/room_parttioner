@@ -4,7 +4,6 @@ from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import cv2
 
-
 class ExtendedPartitioner:
     """
     扩展分区：在自动分区结果基础上进行进一步优化
@@ -79,9 +78,9 @@ class ExtendedPartitioner:
 
         return result
 
-    def extend(self, label_map: np.ndarray, grid_map: np.ndarray) -> np.ndarray:
+    def extend_pixel(self, label_map: np.ndarray, grid_map: np.ndarray) -> np.ndarray:
         """
-        完整扩展分区流程
+        像素级完整扩展分区流程
 
         1. 门口检测拆分
         2. 未分配区域生长
@@ -89,6 +88,10 @@ class ExtendedPartitioner:
         result = self.split_by_doorway(label_map, grid_map)
         result = self.grow_unassigned(result, grid_map)
         return result
+
+    def extend(self, label_map: np.ndarray, grid_map: np.ndarray) -> np.ndarray:
+        """兼容旧接口：等价于 extend_pixel。"""
+        return self.extend_pixel(label_map, grid_map)
 
     def _region_grow(self, mask: np.ndarray, seeds: np.ndarray,
                      num_labels: int) -> np.ndarray:
