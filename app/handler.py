@@ -22,8 +22,10 @@ import logging
 
 from botocore.exceptions import ClientError
 
-from app.core.editor import RoomEditor
+from app.core.config import load_config
 from app.core.errors import RoomPartitionerError
+from app.services.services import RoomService
+from app.utils.s3_loader import S3DataLoader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger("room_partitioner")
 
 
-def handler(event, context):
+def handler(event, _context):
     """Lambda 入口 —— 与旧 app.py 完全兼容"""
     logger.info(json.dumps(event))
 
@@ -59,11 +61,16 @@ def handler(event, context):
             'body': 'need division croods list'
         }
 
-    # 执行
-    editor = RoomEditor(bucket, key)
-
     try:
-        labels_json = editor.room_edit(
+        # 加载数据
+        loader = S3DataLoader(bucket, key)
+        map_data = loader.load()
+
+        # 执行操作
+        config = load_config()
+        service = RoomService(config)
+        labels_json = service.room_edit(
+            map_data=map_data,
             operation=operation,
             division_croods_dict=event.get('divisionCroodsDict'),
             room_merge_list=event.get('roomMergeList'),
