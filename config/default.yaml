@@ -1,3 +1,7 @@
+# ---- 版本 ----
+service_version: "4.0.2"          # 服务版本
+model_version_tag: "0.0.1"       # 模型版本
+
 # ---- 前处理 ----
 target_size: [1024, 1024]
 normalize: false              # YOLOv8 仅需 /255.0, 无需 ImageNet 标准化

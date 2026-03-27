@@ -34,7 +34,6 @@ from app.utils.geometry_ops import (
 
 logger = logging.getLogger(__name__)
 
-VERSION = "online_4.0.2"
 
 
 class ExtendedPartitioner:
@@ -526,7 +525,7 @@ class ExtendedPartitioner:
 
         # step15: 组装输出
         labels = {
-            "version": VERSION,
+            "version": self.config.get("labels_version", f"v{self.config.get('service_version', '4.0.2')}"),
             "uuid": map_data.get("uuid", ""),
             "data": rooms_data + landmarks_data,
         }

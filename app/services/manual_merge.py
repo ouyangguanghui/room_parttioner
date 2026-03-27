@@ -440,7 +440,7 @@ class ManualMerger:
 
         # step7 回写结果
         labels = {
-            "version": "online_4.0.2",
+            "version": self.config.get("labels_version", f"v{self.config.get('service_version', '4.0.2')}"),
             "uuid": map_data["uuid"],
             "data": new_rooms_data + new_landmarks_data,
         }

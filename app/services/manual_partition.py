@@ -316,6 +316,6 @@ class ManualPartitioner:
         logger.info(f">>>> old landmarks number: {len(landmarks_data)}, new landmarks number: {len(new_landmarks_data)}")
             
         # step7 回写结果（先保持原始顺序：ROOM + LANDMARK）
-        labels = {"version": "online_4.0.2", "uuid": map_data["uuid"], "data": new_rooms_data + new_landmarks_data}
+        labels = {"version": self.config.get("labels_version", f"v{self.config.get('service_version', '4.0.2')}"), "uuid": map_data["uuid"], "data": new_rooms_data + new_landmarks_data}
     
         return labels

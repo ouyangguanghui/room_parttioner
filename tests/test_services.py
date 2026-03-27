@@ -66,7 +66,7 @@ def map_data_with_labels():
         "resolution": 0.05,
         "origin": [0.0, 0.0],
         "labels_json": {
-            "version": "online_4.0.2",
+            "version": "v4.0.2_0.0.1",
             "uuid": "test-uuid",
             "data": [
                 {
@@ -268,10 +268,10 @@ class TestToolsCreation:
 class TestEndToEnd:
     def test_split_returns_labels_json(self, service, map_data_no_labels):
         """完整 split 流程返回 labels_json 格式"""
-        expected = {"version": "online_4.0.2", "uuid": "test-uuid", "data": []}
+        expected = {"version": "v4.0.2_0.0.1", "uuid": "test-uuid", "data": []}
         with patch.object(service.auto_partitioner, "process", return_value=expected):
             result = service.room_edit(map_data_no_labels, "split")
-        assert result["version"] == "online_4.0.2"
+        assert result["version"] == "v4.0.2_0.0.1"
         assert "data" in result
 
     def test_preprocessor_called_before_service(self, service, map_data_no_labels):

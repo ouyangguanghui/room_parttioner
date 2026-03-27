@@ -5,12 +5,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.core.config import load_config
 from app.services.manual_partition import ManualPartitioner
 
 
 @pytest.fixture
 def partitioner():
-    return ManualPartitioner({"line_thickness": 2})
+    return ManualPartitioner(load_config())
 
 
 def test_split_room_splits_polygon_and_appends_new_room(partitioner):
@@ -119,7 +120,7 @@ def test_process_assembles_output_labels(partitioner):
             landmark_builder=MagicMock(),
         )
 
-    assert out["version"] == "online_4.0.2"
+    assert out["version"] == "v4.0.2_0.0.1"
     assert out["uuid"] == "u-001"
     assert len(out["data"]) == 4
     assert [d["id"] for d in out["data"]] == [

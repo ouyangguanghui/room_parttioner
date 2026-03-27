@@ -10,6 +10,9 @@ _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 
 
 _DEFAULT_CONFIG = {
+    # 版本
+    "service_version": "4.0.2",
+    "model_version_tag": "0.0.1",
     # 前处理
     "target_size": [512, 512],
     "normalize": True,
@@ -37,6 +40,8 @@ _DEFAULT_CONFIG = {
 
 # 环境变量映射：ENV_NAME -> (config_key, type)
 _ENV_MAP = {
+    "SERVICE_VERSION": ("service_version", str),
+    "MODEL_VERSION_TAG": ("model_version_tag", str),
     "TRITON_URL": ("triton_url", str),
     "MODEL_NAME": ("model_name", str),
     "MODEL_VERSION": ("model_version", str),
@@ -82,5 +87,10 @@ def load_config(yaml_path: str = None, overrides: Dict[str, Any] = None) -> Dict
     target_size_env = os.getenv("TARGET_SIZE")
     if target_size_env:
         config["target_size"] = [int(x) for x in target_size_env.split(",")]
+
+    # 自动拼接 labels_version: "online_{service_version}_{model_version_tag}"
+    sv = config.get("service_version", "")
+    mv = config.get("model_version_tag", "")
+    config["labels_version"] = f"v{sv}_{mv}" if mv else f"v{sv}"
 
     return config

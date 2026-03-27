@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from app.services.manual_merge import ManualMerger
+from app.core.config import load_config
 from app.core.errors import (
     InvalidParameterError,
     RoomIndexOutOfRangeError,
@@ -18,7 +19,7 @@ from app.core.errors import (
 
 @pytest.fixture
 def merger():
-    return ManualMerger({"resolution": 0.05})
+    return ManualMerger(load_config())
 
 
 @pytest.fixture
@@ -417,7 +418,7 @@ class TestProcess:
                 landmark_builder=MagicMock(),
             )
 
-        assert out["version"] == "online_4.0.2"
+        assert out["version"] == "v4.0.2_0.0.1"
         assert out["uuid"] == "u-001"
         assert len(out["data"]) == 2  # 1 room + 1 landmark
         assert out["data"][0]["id"] == "ROOM_001"
