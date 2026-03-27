@@ -96,6 +96,7 @@ def _extract_points_from_geom(geom) -> List[Tuple[float, float]]:
     return []
 
 
+
 def _build_extended_cut_line(
     A: Tuple[float, float],
     B: Tuple[float, float],
@@ -145,22 +146,57 @@ def _find_split_points_shapely(
         if len(intersections) < 2:
             return False, "交点不足两个"
 
-        # 与原版保持一致：多交点时取离 A/B 最近的两点
-        ia = min(range(len(intersections)), key=lambda i: math.dist(A, intersections[i]))
-        ib = min(range(len(intersections)), key=lambda i: math.dist(B, intersections[i]))
-        if ia == ib and len(intersections) > 1:
-            dists = sorted(
-                ((math.dist(B, p), i) for i, p in enumerate(intersections) if i != ia),
-                key=lambda x: x[0],
-            )
-            ib = dists[0][1]
-        picked = [intersections[ia], intersections[ib]]
+        # 沿 A→B 方向排序交点
+        vx, vy = B[0] - A[0], B[1] - A[1]
+        intersections.sort(key=lambda p: p[0] * vx + p[1] * vy)
 
-        # 切分
-        parts = shp_split(poly, cut_line)
+        # 选取最佳交点对：线段中点在多边形内部且最靠近 A-B 中点
+        ab_mid = ((A[0] + B[0]) / 2, (A[1] + B[1]) / 2)
+        from shapely.geometry import Point
+        best_pair = None
+        best_dist = float('inf')
+        for i in range(len(intersections) - 1):
+            pa_c, pb_c = intersections[i], intersections[i + 1]
+            mid = ((pa_c[0] + pb_c[0]) / 2, (pa_c[1] + pb_c[1]) / 2)
+            if poly.contains(Point(mid)):
+                d = math.dist(mid, ab_mid)
+                if d < best_dist:
+                    best_dist = d
+                    best_pair = (pa_c, pb_c)
+
+        if best_pair is None:
+            # 回退到原始逻辑：取离 A/B 最近的两点
+            ia = min(range(len(intersections)), key=lambda i: math.dist(A, intersections[i]))
+            ib = min(range(len(intersections)), key=lambda i: math.dist(B, intersections[i]))
+            if ia == ib and len(intersections) > 1:
+                dists = sorted(
+                    ((math.dist(B, p), j) for j, p in enumerate(intersections) if j != ia),
+                    key=lambda x: x[0],
+                )
+                ib = dists[0][1]
+            best_pair = (intersections[ia], intersections[ib])
+
+        pa, pb = best_pair
+        picked = [pa, pb]
+
+        seg_len = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+        if seg_len < 1e-10:
+            return False, "两交点重合"
+
+        # 用两个目标交点构造短切线
+        eps = seg_len * 1e-6
+        ux, uy = (pb[0] - pa[0]) / seg_len, (pb[1] - pa[1]) / seg_len
+        short_line = LineString([
+            (pa[0] - ux * eps, pa[1] - uy * eps),
+            (pb[0] + ux * eps, pb[1] + uy * eps),
+        ])
+
+        parts = shp_split(poly, short_line)
         polys = [g for g in parts.geoms if g.geom_type == "Polygon" and not g.is_empty]
         if len(polys) < 2:
             return False, "split failed"
+
+        # 只保留两个最大碎片（短线段应该恰好切出 2 块）
         polys.sort(key=lambda p: p.area, reverse=True)
         p1, p2 = polys[0], polys[1]
 

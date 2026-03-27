@@ -5,9 +5,10 @@
   2. 发送张量 → 获取原始输出
   3. 将原始输出解码为 OBB 列表 (供 Postprocessor 消费)
 
-支持两种模型输出格式:
-  - "xyxyxyxy": 4 点坐标 [x1,y1,x2,y2,x3,y3,x4,y4, conf, cls]
-  - "xywha":    YOLO-OBB [cx, cy, w, h, angle, conf, cls]
+支持三种模型输出格式:
+  - "yolo_obb":   YOLO-OBB 原始输出 (1, 4+nc+1, N) → 转置解码 (YOLOv8/v11/v26 通用)
+  - "xyxyxyxy":   4 点坐标 [x1,y1,x2,y2,x3,y3,x4,y4, conf, cls]
+  - "xywha":      YOLO-OBB [cx, cy, w, h, angle, conf, cls]
 """
 
 import math
@@ -54,9 +55,9 @@ class Inferencer:
         self.output_name = self.config.get("output_name", "output")
 
         # 解码参数
-        self.conf_threshold = self.config.get("conf_threshold", 0.5)
-        self.nms_threshold = self.config.get("nms_threshold", 0.45)
-        self.output_format = self.config.get("output_format", "xyxyxyxy")
+        self.conf_threshold = self.config.get("conf_threshold", 0.6)
+        self.nms_threshold = self.config.get("nms_threshold", 0.1)
+        self.output_format = self.config.get("output_format", "yolo_obb")
 
     # ==================== 健康检查 ====================
 
@@ -95,10 +96,59 @@ class Inferencer:
         Returns:
             [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], ...]
         """
-        if self.output_format == "xywha":
+        if self.output_format == "yolo_obb":
+            return self._decode_yolo_obb(raw_output)
+        elif self.output_format == "xywha":
             return self._decode_xywha(raw_output)
         else:
             return self._decode_xyxyxyxy(raw_output)
+
+    def _decode_yolo_obb(self, raw: np.ndarray) -> List[List[List[float]]]:
+        """
+        解码 YOLO-OBB 原始输出 (Ultralytics YOLOv8/v11/v26 通用)
+
+        模型输出 shape: (batch, 4+nc+1, num_detections)
+        例如: (1, 6, 21504) 表示单类别 OBB
+            - 6 = 4(cx,cy,w,h) + 1(class_conf) + 1(angle)
+            - 21504 = 检测框候选数
+        转置后每行: [cx, cy, w, h, conf, angle]
+        """
+        # 去掉 batch 维度
+        if raw.ndim == 3:
+            raw = raw[0]  # (6, 21504)
+
+        # 转置: (6, N) → (N, 6)
+        preds = raw.T  # (21504, 6)
+
+        if preds.shape[0] == 0 or preds.shape[1] < 6:
+            logger.warning("YOLO-OBB 输出为空或维度不足: shape=%s", preds.shape)
+            return []
+
+        # 置信度在 index 4
+        confs = preds[:, 4]
+        mask = confs >= self.conf_threshold
+        preds = preds[mask]
+        confs = confs[mask]
+
+        if len(preds) == 0:
+            logger.info("无检测结果 (conf >= %.2f)", self.conf_threshold)
+            return []
+
+        # 解码: cx, cy, w, h, conf, angle → 4 顶点
+        obbs = []
+        for row in preds:
+            cx, cy, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+            angle = float(row[5])  # angle 在 index 5
+            vertices = self._xywha_to_vertices(cx, cy, w, h, angle)
+            obbs.append(vertices)
+
+        # NMS
+        if len(obbs) > 1:
+            scores = confs.tolist()
+            obbs = self._nms_obb(obbs, scores, self.nms_threshold)
+
+        logger.info("YOLO-OBB 解码: %d 个 OBB (conf >= %.2f)", len(obbs), self.conf_threshold)
+        return obbs
 
     def _decode_xyxyxyxy(self, raw: np.ndarray) -> List[List[List[float]]]:
         """

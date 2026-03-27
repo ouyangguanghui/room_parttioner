@@ -16,12 +16,12 @@ import numpy as np
 
 try:
     import tritonclient.grpc as grpcclient
-except ImportError:
+except (ImportError, RuntimeError):
     grpcclient = None
 
 try:
     import tritonclient.http as httpclient
-except ImportError:
+except (ImportError, RuntimeError):
     httpclient = None
 
 logger = logging.getLogger(__name__)

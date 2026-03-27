@@ -2,10 +2,12 @@
 
 import random
 from typing import Dict, Any, List, Tuple, Optional
+import logging
 
 import numpy as np
 import cv2
 
+logger = logging.getLogger(__name__)
 
 class RoomGraph:
     """
@@ -44,7 +46,7 @@ class RoomGraph:
         h, w = map_img.shape[:2]
         n = len(contours)
         graph: Dict[int, List[int]] = {i: [] for i in range(n)}
-        min_gap_pixels = 0.10 / (self.resolution ** 2)
+        min_gap_pixels = 0.10 / (self.resolution ** 2) 
 
         # 灰度图: 墙壁标为255方便后续掩码运算
         if map_img.ndim == 3:
@@ -82,11 +84,11 @@ class RoomGraph:
         if num_objects == 2:
             return True
         # 间隙面积都小于阈值 → 也算相邻
-        all_small = all(
-            stats[k, cv2.CC_STAT_AREA] < min_gap_pixels
-            for k in range(1, num_objects)
-        )
-        return not all_small if num_objects > 2 else False
+        # all_small = all(
+        #     stats[k, cv2.CC_STAT_AREA] < min_gap_pixels
+        #     for k in range(1, num_objects)
+        # )
+        # return not all_small if num_objects > 2 else False
 
     def check_connectivity(self, cnt1: np.ndarray, cnt2: np.ndarray,
                            map_img: np.ndarray) -> bool:
@@ -144,6 +146,7 @@ class RoomGraph:
             current_colors[nb] for nb in graph.get(room_idx, [])
             if nb in current_colors and current_colors[nb] is not None
         }
+        logger.info(f">>>> neighbor_colors: {neighbor_colors}")
         for c in range(self.NUM_COLORS):
             if c not in neighbor_colors:
                 return c

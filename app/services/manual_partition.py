@@ -7,6 +7,7 @@
 
 import logging
 from typing import Dict, Any, List, Tuple
+from cv2 import log
 from shapely.geometry import Polygon
 
 import numpy as np
@@ -125,7 +126,7 @@ class ManualPartitioner:
                 "id": new_id,
                 "type": rooms_data[target_room_idx].get('type', 'polygon'),
                 "geometry": geom_b,
-                "colorType": rooms_data[target_room_idx].get('colorType', None),
+                "colorType": None,
                 "graph": None,
                 "groundMaterial": rooms_data[target_room_idx].get('groundMaterial', None),
             })
@@ -136,7 +137,7 @@ class ManualPartitioner:
                 "id": new_id,
                 "type": rooms_data[target_room_idx].get('type', 'polygon'),
                 "geometry": geom_a,
-                "colorType": rooms_data[target_room_idx].get('colorType', None),
+                "colorType": None,
                 "graph": None,
                 "groundMaterial": rooms_data[target_room_idx].get('groundMaterial', None),
             })
@@ -158,18 +159,28 @@ class ManualPartitioner:
         contours_list = transformer.rooms_data_to_contours(rooms_data)
         graph = graph_builder.build_graph(contours_list, map_img)
         
+        logger.info(f">>>> graph: {graph}")
         for room_idx in range(len(rooms_data)):
             # 打印一下graph是否有变化
-            logger.info(f">>>> room_idx : {room_idx}, original graph: {rooms_data[room_idx]['graph']}, new graph: {graph[room_idx]}")
+            old_graph_id = [rooms_data[i]['id'] for i in (rooms_data[room_idx].get('graph') or []) if i is not None]
+            new_graph_id = [rooms_data[i]['id'] for i in (graph[room_idx] or []) if i is not None]
+            logger.info(f">>>> room_id : {rooms_data[room_idx]['id']}： {old_graph_id} ---> {new_graph_id}")
             rooms_data[room_idx]["graph"] = graph[room_idx]
         
         # 着色
         # 取出所有房间的colorType
         current_colors = {room_idx: rooms_data[room_idx]["colorType"] for room_idx in range(len(rooms_data))}
+        logger.info(f">>>> current_colors: {current_colors}")
         if rooms_data[target_room_idx]["colorType"] is None:
-            rooms_data[target_room_idx]["colorType"] = graph_builder.assign_color_for_room(target_room_idx, graph, current_colors)
-        if rooms_data[-1]["colorType"] is None:
-            rooms_data[-1]["colorType"] = graph_builder.assign_color_for_room(-1, graph, current_colors)
+            logger.info(f">>> set target room colorType")
+            target_room_color = graph_builder.assign_color_for_room(target_room_idx, graph, current_colors)
+            logger.info(f">>>> target room colorType: {target_room_color}")
+            rooms_data[target_room_idx]["colorType"] = target_room_color
+        if rooms_data[len(rooms_data) - 1]["colorType"] is None:
+            logger.info(f">>> set new room colorType")
+            new_room_color = graph_builder.assign_color_for_room(len(rooms_data) - 1, graph, current_colors)
+            logger.info(f">>>> new room colorType: {new_room_color}")
+            rooms_data[len(rooms_data) - 1]["colorType"] = new_room_color
         return rooms_data, contours_list, graph
 
 
