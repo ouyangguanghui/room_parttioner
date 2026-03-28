@@ -235,8 +235,6 @@ class TestFallbackPartition:
         map_data = np.zeros((20, 40), dtype=np.uint8)
         map_data[2:8, 2:8] = 255
         map_data[2:8, 12:18] = 255
-        meta = {"map_data": map_data}
-
         with patch.object(partitioner.postprocessor, "_split_by_area") as mock_split, \
              patch.object(partitioner.postprocessor, "_merge_fragments") as mock_merge:
             mock_split.return_value = (
@@ -244,14 +242,13 @@ class TestFallbackPartition:
                 np.zeros((20, 40), dtype=np.int32),
             )
             mock_merge.return_value = np.zeros((20, 40), dtype=np.int32)
-            partitioner._fallback_partition(meta)
+            partitioner._fallback_partition(map_data)
             mock_split.assert_called_once()
             mock_merge.assert_called_once()
 
     def test_all_black_fallback(self, partitioner):
         """全黑地图: 使用 >0 的 fallback 阈值"""
         map_data = np.zeros((10, 10), dtype=np.uint8)
-        meta = {"map_data": map_data}
         with patch.object(partitioner.postprocessor, "_split_by_area") as mock_split, \
              patch.object(partitioner.postprocessor, "_merge_fragments") as mock_merge:
             mock_split.return_value = (
@@ -259,7 +256,7 @@ class TestFallbackPartition:
                 np.zeros((10, 10), dtype=np.int32),
             )
             mock_merge.return_value = np.zeros((10, 10), dtype=np.int32)
-            partitioner._fallback_partition(meta)
+            partitioner._fallback_partition(map_data)
             mock_split.assert_called_once()
 
 
@@ -270,11 +267,11 @@ class TestPartition:
         """无 inferencer 时走 fallback"""
         map_data = np.zeros((20, 20), dtype=np.uint8)
         map_data[2:8, 2:8] = 255
-        meta = {"map_data": map_data}
+        map_data_dict = {"input_img": map_data}
 
         with patch.object(partitioner, "_fallback_partition") as mock_fb:
             mock_fb.return_value = np.array([[0, 1], [2, 0]], dtype=np.int32)
-            result = partitioner.partition(meta, extend=False)
+            result = partitioner.partition(map_data_dict, extend=False)
             mock_fb.assert_called_once()
             assert "label_map" in result
             assert "contours" in result
@@ -288,20 +285,21 @@ class TestPartition:
             lm[0:5, :] = 1
             lm[5:10, :] = 2
             mock_infer.return_value = (lm, [{"threshold": 0.5}], 2)
-            meta = {"map_data": np.zeros((10, 10), dtype=np.uint8)}
-            result = p.partition(meta, extend=False)
+            map_data_dict = {"input_img": np.zeros((10, 10), dtype=np.uint8)}
+            result = p.partition(map_data_dict, extend=False)
             mock_infer.assert_called_once()
             assert result["thickness_size"] == 2
 
     def test_partition_with_extend(self, partitioner):
-        meta = {"map_data": np.zeros((10, 10), dtype=np.uint8)}
-        with patch.object(partitioner, "_fallback_partition") as mock_fb, \
-             patch.object(partitioner.extended, "extend_pixel") as mock_ext:
+        """extend=True 时不再调用 extended.extend_pixel，仅做 relabel + 提取轮廓"""
+        map_data_dict = {"input_img": np.zeros((10, 10), dtype=np.uint8)}
+        with patch.object(partitioner, "_fallback_partition") as mock_fb:
             lm = np.array([[0, 1], [2, 0]], dtype=np.int32)
             mock_fb.return_value = lm
-            mock_ext.return_value = lm
-            partitioner.partition(meta, extend=True)
-            mock_ext.assert_called_once()
+            result = partitioner.partition(map_data_dict, extend=True)
+            mock_fb.assert_called_once()
+            assert "label_map" in result
+            assert "contours" in result
 
 
 # ==================== TestExpandContours ====================
@@ -555,10 +553,9 @@ class TestProcess:
             "origin": [0, 0],
             "uuid": "test-uuid",
             "robot_model": "s10",
-        }
-        meta = {
-            "map_data": np.full((20, 20), 200, dtype=np.uint8),
-            "input_data": np.full((20, 20), 200, dtype=np.uint8),
+            "cleaned_img": np.full((20, 20), 200, dtype=np.uint8),
+            "cleaned_img2": np.full((20, 20), 200, dtype=np.uint8),
+            "input_img": np.full((20, 20), 200, dtype=np.uint8),
         }
 
         # Mock partition 返回
@@ -576,7 +573,7 @@ class TestProcess:
             mock_beauty.return_value = (None, None)
 
             result = partitioner.process(
-                map_data, meta, mock_transformer,
+                map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 
@@ -595,8 +592,10 @@ class TestProcess:
             "map_img": map_img,
             "labels_json": {"data": [{"id": "ROOM_001"}]},
             "robot_model": "s10",
+            "input_img": map_img,
+            "cleaned_img": map_img,
+            "cleaned_img2": map_img,
         }
-        meta = {"map_data": map_img, "input_data": map_img}
 
         cnt = np.array([[[2, 2]], [[8, 2]], [[8, 8]], [[2, 8]]], dtype=np.int32)
         with patch.object(partitioner, "partition") as mock_part, \
@@ -612,16 +611,16 @@ class TestProcess:
             mock_beauty.return_value = (None, None)
 
             partitioner.process(
-                map_data, meta, mock_transformer,
+                map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
                 repartition=True,
             )
             mock_part.assert_called_once()
 
-    def test_existing_labels_no_repartition(
+    def test_existing_labels_still_partitions(
         self, partitioner, mock_transformer, mock_graph_builder, mock_landmark_builder
     ):
-        """有 labels_json 且 repartition=False 走扩展分区路径"""
+        """有 labels_json 时 AutoPartitioner 仍执行 partition()（扩展分区由 ExtendedPartitioner 负责）"""
         map_img = np.full((20, 20), 200, dtype=np.uint8)
         labels_json = {
             "data": [
@@ -632,29 +631,31 @@ class TestProcess:
             "map_img": map_img,
             "labels_json": labels_json,
             "robot_model": "s10",
+            "input_img": map_img,
+            "cleaned_img": map_img,
+            "cleaned_img2": map_img,
         }
-        meta = {"map_data": map_img, "input_data": map_img}
 
         cnt = np.array([[[2, 2]], [[8, 2]], [[8, 8]], [[2, 8]]], dtype=np.int32)
-        mock_transformer.rooms_data_to_contours.return_value = [cnt]
 
         with patch.object(partitioner, "partition") as mock_part, \
              patch.object(partitioner, "expand_contours") as mock_exp, \
-             patch.object(partitioner, "beautify_contours") as mock_beauty, \
-             patch.object(partitioner.extended, "extend_pixel") as mock_extend:
-            mock_extend.return_value = np.ones((20, 20), dtype=np.int32)
+             patch.object(partitioner, "beautify_contours") as mock_beauty:
+            mock_part.return_value = {
+                "label_map": np.ones((20, 20), dtype=np.int32),
+                "contours": [cnt],
+                "threshold_list": [],
+                "thickness_size": 2,
+            }
             mock_exp.return_value = [cnt]
             mock_beauty.return_value = (None, None)
 
             partitioner.process(
-                map_data, meta, mock_transformer,
+                map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
                 extend=True,
             )
-            # 不应走 partition()
-            mock_part.assert_not_called()
-            # 应走 extend_pixel
-            mock_extend.assert_called_once()
+            mock_part.assert_called_once()
 
     def test_k20pro_generates_landmarks(
         self, partitioner, mock_transformer, mock_graph_builder, mock_landmark_builder
@@ -665,8 +666,10 @@ class TestProcess:
             "map_img": map_img,
             "robot_model": "S-K20PRO",
             "uuid": "k20-uuid",
+            "input_img": map_img,
+            "cleaned_img": map_img,
+            "cleaned_img2": map_img,
         }
-        meta = {"map_data": map_img, "input_data": map_img}
 
         cnt = np.array([[[2, 2]], [[8, 2]], [[8, 8]], [[2, 8]]], dtype=np.int32)
         mock_landmark_builder.generate_landmarks.return_value = [
@@ -686,7 +689,7 @@ class TestProcess:
             mock_beauty.return_value = (None, None)
 
             result = partitioner.process(
-                map_data, meta, mock_transformer,
+                map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 

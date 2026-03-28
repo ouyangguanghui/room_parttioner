@@ -33,6 +33,6 @@ def test_process_returns_expected_meta_structure():
 
     out = pp.process(img)
 
-    assert set(out.keys()) == {"map_data", "input_data"}
-    assert out["map_data"].shape == img.shape
-    assert out["input_data"].shape == img.shape
+    assert set(out.keys()) == {"cleaned_img", "cleaned_img2", "input_img"}
+    assert out["input_img"].shape == img.shape
+    assert out["cleaned_img"].shape == img.shape

@@ -4,11 +4,10 @@
   1. 推理器 (Inferencer): 调用 Triton 模型或使用连通域 fallback
   2. 后处理器 (Postprocessor): OBB 解码 → threshold 切割 → 面积过滤 → 碎片合并
 
-预处理在外部完成，传入 meta dict:
-  meta = {
-      "map_data":   去噪但未补墙的地图 (H, W) uint8
-      "input_data": 补墙平滑后的地图 (H, W) uint8
-  }
+预处理结果直接存放在 map_data 字典中:
+  map_data["cleaned_img"]  : 去噪但未补墙的地图 (H, W) uint8
+  map_data["cleaned_img2"] : 去噪+去未知噪点后的地图 (H, W) uint8
+  map_data["input_img"]    : 补墙平滑后的地图 (H, W) uint8
 
 process() 入口签名与 ManualPartitioner / ManualMerger 保持一致:
   process(map_data, transformer, graph_builder, landmark_builder) -> labels_json
@@ -22,7 +21,6 @@ import cv2
 
 from app.pipeline.inferencer import Inferencer
 from app.pipeline.postprocessor import Postprocessor
-from app.services.extended_partition import ExtendedPartitioner
 from app.utils.coordinate import CoordinateTransformer
 from app.utils.graph import RoomGraph
 from app.utils.landmark import LandmarkManager
@@ -48,7 +46,6 @@ class AutoPartitioner:
         if self.config.get("triton_url"):
             self.inferencer = Inferencer(self.config)
         self.postprocessor = Postprocessor(self.config)
-        self.extended = ExtendedPartitioner(self.config)
 
         # 张量准备参数
         self.target_size: List[int] = self.config.get("target_size", [512, 512])
@@ -64,13 +61,14 @@ class AutoPartitioner:
 
     # ==================== 核心分区 ====================
 
-    def partition(self, meta: Dict[str, Any],
+    def partition(self, map_data: Dict[str, Any],
                   extend: bool = True) -> Dict[str, Any]:
         """
         核心分区: 推理 → 后处理 → [扩展] → label_map + 轮廓
 
         Args:
-            meta: 预处理结果 {"map_data": ..., "input_data": ...}
+            map_data: 地图数据字典，至少包含:
+                "input_img": 补墙平滑后的灰度地图 (H, W) uint8
             extend: 是否执行扩展分区 (门口检测 + 区域生长)
 
         Returns:
@@ -81,17 +79,14 @@ class AutoPartitioner:
                 "thickness_size": int,
             }
         """
-        map_data = meta["map_data"]
+        input_img = map_data["input_img"]
 
         if self.inferencer and self.inferencer.is_ready():
-            label_map, threshold_list, thickness_size = self._infer_partition(map_data, meta)
+            label_map, threshold_list, thickness_size = self._infer_partition(input_img, map_data)
         else:
-            label_map = self._fallback_partition(meta)
+            label_map = self._fallback_partition(input_img)
             threshold_list = []
             thickness_size = self.config.get("thickness", 2)
-
-        if extend:
-            label_map = self.extended.extend_pixel(label_map, map_data)
 
         # relabel 使 ID 连续
         label_map = self._relabel(label_map)
@@ -106,33 +101,32 @@ class AutoPartitioner:
             "thickness_size": thickness_size,
         }
 
-    def _infer_partition(self, map_data: np.ndarray,
-                         meta: Dict[str, Any]
+    def _infer_partition(self, input_img: np.ndarray,
+                         map_data: Dict[str, Any]
                          ) -> Tuple[np.ndarray, List, int]:
         """模型推理分区路径"""
-        tensor = self._prepare_tensor(map_data, meta)
+        tensor = self._prepare_tensor(input_img, map_data)
         raw_output = self.inferencer.run(tensor)
-        result = self.postprocessor.process(raw_output, meta)
+        result = self.postprocessor.process(raw_output, map_data)
         return result["room_map"], result["threshold_list"], result["thickness_size"]
 
-    def _fallback_partition(self, meta: Dict[str, Any]) -> np.ndarray:
+    def _fallback_partition(self, input_img: np.ndarray) -> np.ndarray:
         """传统连通域分割 (Triton 不可用时的兜底方案)"""
-        map_data = meta["map_data"]
-        free = (map_data >= 200).astype(np.uint8)
+        free = (input_img >= 200).astype(np.uint8)
         if not free.any():
-            free = (map_data > 0).astype(np.uint8)
+            free = (input_img > 0).astype(np.uint8)
 
         _, labels = cv2.connectedComponents(free, connectivity=8)
         labels = labels.astype(np.int32)
 
-        normal_map, small_map = self.postprocessor._split_by_area(labels, map_data)
+        normal_map, small_map = self.postprocessor._split_by_area(labels, input_img)
         labels = self.postprocessor._merge_fragments(normal_map, small_map)
         return labels
 
     # ==================== 张量准备 ====================
 
-    def _prepare_tensor(self, map_data: np.ndarray,
-                        meta: Dict[str, Any]) -> np.ndarray:
+    def _prepare_tensor(self, input_img: np.ndarray,
+                        map_data: Dict[str, Any]) -> np.ndarray:
         """
         将预处理后的灰度地图转换为 Triton 模型输入张量
 
@@ -142,11 +136,11 @@ class AutoPartitioner:
             3. uint8 → float32 归一化 [0, 1], 可选 ImageNet 均值/方差标准化
             4. HWC → NCHW
 
-        同时将 scale / pad 写入 meta, 供 postprocessor 做坐标逆映射。
+        同时将 scale / pad 写入 map_data, 供 postprocessor 做坐标逆映射。
 
         Args:
-            map_data: 前处理后的灰度地图 (H, W) uint8
-            meta: 会追加 tensor_scale / tensor_pad / tensor_size
+            input_img: 前处理后的灰度地图 (H, W) uint8
+            map_data: 会追加 tensor_scale / tensor_pad / tensor_size / pre_pad
 
         Returns:
             tensor: (1, 3, target_h, target_w) float32
@@ -154,10 +148,10 @@ class AutoPartitioner:
         th, tw = self.target_size[0], self.target_size[1]
 
         # 灰度 → BGR
-        if map_data.ndim == 2:
-            img_bgr = cv2.cvtColor(map_data, cv2.COLOR_GRAY2BGR)
+        if input_img.ndim == 2:
+            img_bgr = cv2.cvtColor(input_img, cv2.COLOR_GRAY2BGR)
         else:
-            img_bgr = map_data.copy()
+            img_bgr = input_img.copy()
 
         h, w = img_bgr.shape[:2]
 
@@ -196,11 +190,11 @@ class AutoPartitioner:
             tensor.transpose(2, 0, 1)[np.newaxis, ...], dtype=np.float32
         )
 
-        # 写入 meta, 供 postprocessor 逆映射
-        meta["tensor_scale"] = scale
-        meta["tensor_pad"] = (pad_top, pad_left)
-        meta["tensor_size"] = (th, tw)
-        meta["pre_pad"] = pre_pad
+        # 写入 map_data, 供 postprocessor 逆映射
+        map_data["tensor_scale"] = scale
+        map_data["tensor_pad"] = (pad_top, pad_left)
+        map_data["tensor_size"] = (th, tw)
+        map_data["pre_pad"] = pre_pad
 
         return tensor
 
@@ -373,7 +367,6 @@ class AutoPartitioner:
     def process(
         self,
         map_data: Dict[str, Any],
-        meta: Dict[str, Any],
         transformer: CoordinateTransformer,
         graph_builder: RoomGraph,
         landmark_builder: LandmarkManager,
@@ -393,7 +386,9 @@ class AutoPartitioner:
                 "uuid": UUID str
                 "markers_json": 标记信息 json
                 "world_charge_pose": 充电桩世界坐标 [x, y, z]
-            meta: 预处理结果 {"map_data": ..., "input_data": ...}
+                "cleaned_img": 去噪但未补墙的地图 (H, W) uint8
+                "cleaned_img2": 补墙平滑后的地图 (H, W) uint8
+                "input_img": 预处理后的灰度地图 (H, W) uint8
             transformer: 坐标变换器
             graph_builder: 邻接图构建器
             landmark_builder: 标记点管理器
@@ -410,19 +405,10 @@ class AutoPartitioner:
         need_detect = not labels_json or repartition or not labels_json.get("data")
 
         # step1: 分区
-        if need_detect:
-            logger.info("重新分区" if repartition else "首次分区")
-            partition_result = self.partition(meta, extend=extend)
-            contours = partition_result["contours"]
-        else:
-            logger.info("扩展分区 (已有 labels)")
-            contours = self._restore_contours(labels_json, transformer, map_img)
-            if extend:
-                # 从已有轮廓构建 label_map → 扩展 → 重提取
-                label_map = self._contours_to_label_map(contours, map_img.shape[:2])
-                label_map = self.extended.extend_pixel(label_map, meta["map_data"])
-                label_map = self._relabel(label_map)
-                contours = self._extract_contours(label_map)
+        logger.info("重新分区" if repartition else "首次分区")
+        partition_result = self.partition(map_data, extend=extend)
+        contours = partition_result["contours"]
+
 
         # step2: 轮廓外扩
         contours = self.expand_contours(contours, map_img)

@@ -32,14 +32,8 @@ sys.path.insert(0, str(ROOT))
 
 from app.core.config import load_config
 from app.core.errors import RoomPartitionerError
-from app.pipeline.preprocessor import Preprocessor
-from app.services.auto_partition import AutoPartitioner
-from app.services.extended_partition import ExtendedPartitioner
-from app.services.manual_merge import ManualMerger
-from app.services.manual_partition import ManualPartitioner
+from app.services.services import RoomService
 from app.utils.coordinate import CoordinateTransformer
-from app.utils.graph import RoomGraph
-from app.utils.landmark import LandmarkManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("verify_web")
@@ -48,6 +42,7 @@ logger = logging.getLogger("verify_web")
 
 config = load_config()
 DATA_ROOT: Path = ROOT / "gt_map_data"
+room_service = RoomService(config)
 
 
 # ==================== 数据加载 ====================
@@ -153,8 +148,9 @@ class AutoPartitionRequest(BaseModel):
     triton_url: str = ""
 
 
-class ExtendedPartitionRequest(BaseModel):
+class RepartitionRequest(BaseModel):
     case_id: str
+    triton_url: str = ""
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -210,47 +206,42 @@ def get_case(case_id: str):
 
 
 def _execute_operation(case_id: str, operation: str,
+                       triton_url: str = "",
                        division_dict: Optional[Dict] = None,
                        room_ids: Optional[List[str]] = None) -> Dict:
-    """执行操作并返回新的房间数据"""
+    """通过 RoomService.room_edit() 统一执行操作并返回新的房间数据"""
     case_dir = DATA_ROOT / case_id
     map_data = load_case(case_dir)
-    transformer = CoordinateTransformer(
-        map_data["resolution"], map_data["origin"],
-        map_data["map_img"].shape[0],
-    )
-    graph_builder = RoomGraph(config)
-    landmark_builder = LandmarkManager(config)
 
-    if operation == "division":
-        partitioner = ManualPartitioner(config)
-        result = partitioner.process(
-            map_data, division_dict,
-            transformer, graph_builder, landmark_builder,
-        )
-    elif operation == "merge":
-        merger = ManualMerger(config)
-        result = merger.process(
-            map_data, room_ids,
-            transformer, graph_builder, landmark_builder,
-        )
-    else:
-        raise HTTPException(status_code=400, detail=f"未知操作: {operation}")
+    # triton_url 覆盖时创建临时 service
+    svc = room_service
+    if triton_url:
+        cfg = dict(config)
+        cfg["triton_url"] = triton_url
+        svc = RoomService(cfg)
+
+    result = svc.room_edit(
+        map_data,
+        operation=operation,
+        division_croods_dict=division_dict,
+        room_merge_list=room_ids,
+    )
 
     # 写回 labels.json
     labels_path = case_dir / "labels.json"
     with open(labels_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    logger.info(f"labels.json updated: {labels_path}")
+    logger.info(f"{operation} labels.json updated: {labels_path}")
 
     # 转换新结果的房间为像素坐标
+    transformer = CoordinateTransformer(
+        map_data["resolution"], map_data["origin"],
+        map_data["map_img"].shape[0],
+    )
     new_rooms_data = [d for d in result.get("data", []) if "ROOM" in d.get("id", "")]
-    new_rooms_px = rooms_to_pixel_coords(new_rooms_data, transformer)
+    rooms_px = rooms_to_pixel_coords(new_rooms_data, transformer)
 
-    return {
-        "rooms": new_rooms_px,
-        "labels_json": result,
-    }
+    return {"rooms": rooms_px}
 
 
 @app.post("/api/division")
@@ -282,42 +273,9 @@ def do_merge(req: MergeRequest):
 @app.post("/api/auto_partition")
 def do_auto_partition(req: AutoPartitionRequest):
     try:
-        case_dir = DATA_ROOT / req.case_id
-        map_data = load_case(case_dir)
-
-        # 预处理
-        map_img = map_data["map_img"]
-        gray = cv2.cvtColor(map_img, cv2.COLOR_BGR2GRAY) if map_img.ndim == 3 else map_img
-        cfg = dict(config)
-        if req.triton_url:
-            cfg["triton_url"] = req.triton_url
-        preprocessor = Preprocessor(cfg)
-        meta = preprocessor.process(gray)
-
-        # 构建辅助对象
-        transformer = CoordinateTransformer(
-            map_data["resolution"], map_data["origin"], map_img.shape[0],
-        )
-        graph_builder = RoomGraph(cfg)
-        landmark_builder = LandmarkManager(cfg)
-
-        # 自动分区
-        partitioner = AutoPartitioner(cfg)
-        result = partitioner.process(
-            map_data, meta, transformer, graph_builder, landmark_builder,
-        )
-
-        # 写回 labels.json
-        labels_path = case_dir / "labels.json"
-        with open(labels_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        logger.info(f"auto_partition labels.json updated: {labels_path}")
-
-        # 转换为像素坐标返回
-        new_rooms = [d for d in result.get("data", []) if "ROOM" in d.get("id", "")]
-        rooms_px = rooms_to_pixel_coords(new_rooms, transformer)
-        return {"ok": True, "rooms": rooms_px}
-
+        result = _execute_operation(req.case_id, "split",
+                                    triton_url=req.triton_url)
+        return {"ok": True, "rooms": result["rooms"]}
     except RoomPartitionerError as e:
         return {"ok": False, "error": f"[{e.code}] {e}"}
     except Exception as e:
@@ -325,49 +283,16 @@ def do_auto_partition(req: AutoPartitionRequest):
         return {"ok": False, "error": str(e)}
 
 
-@app.post("/api/extended_partition")
-def do_extended_partition(req: ExtendedPartitionRequest):
+@app.post("/api/repartition")
+def do_repartition(req: RepartitionRequest):
     try:
-        case_dir = DATA_ROOT / req.case_id
-        map_data = load_case(case_dir)
-
-        if not map_data.get("labels_json") or not map_data["labels_json"].get("data"):
-            return {"ok": False, "error": "无已有房间数据，请先执行 Auto Partition"}
-
-        # 预处理
-        map_img = map_data["map_img"]
-        gray = cv2.cvtColor(map_img, cv2.COLOR_BGR2GRAY) if map_img.ndim == 3 else map_img
-        preprocessor = Preprocessor(config)
-        meta = preprocessor.process(gray)
-
-        # 构建辅助对象
-        transformer = CoordinateTransformer(
-            map_data["resolution"], map_data["origin"], map_img.shape[0],
-        )
-        graph_builder = RoomGraph(config)
-        landmark_builder = LandmarkManager(config)
-
-        # 扩展分区
-        ext_partitioner = ExtendedPartitioner(config)
-        result = ext_partitioner.process(
-            map_data, meta, transformer, graph_builder, landmark_builder,
-        )
-
-        # 写回 labels.json
-        labels_path = case_dir / "labels.json"
-        with open(labels_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        logger.info(f"extended_partition labels.json updated: {labels_path}")
-
-        # 转换为像素坐标返回
-        new_rooms = [d for d in result.get("data", []) if "ROOM" in d.get("id", "")]
-        rooms_px = rooms_to_pixel_coords(new_rooms, transformer)
-        return {"ok": True, "rooms": rooms_px}
-
+        result = _execute_operation(req.case_id, "repartition",
+                                    triton_url=req.triton_url)
+        return {"ok": True, "rooms": result["rooms"]}
     except RoomPartitionerError as e:
         return {"ok": False, "error": f"[{e.code}] {e}"}
     except Exception as e:
-        logger.error(f"extended_partition 异常: {e}", exc_info=True)
+        logger.error(f"repartition 异常: {e}", exc_info=True)
         return {"ok": False, "error": str(e)}
 
 
@@ -432,7 +357,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
     <input id="tritonUrl" type="text" placeholder="ip:port" value=""
            style="width:160px;padding:4px 8px;border-radius:4px;border:1px solid #444;background:#0f3460;color:#eee;font-size:13px;">
     <button onclick="executeAutoPartition()" style="background:#4ecca3;color:#000;font-weight:bold;padding:6px 12px;border-radius:4px;border:none;cursor:pointer;">Auto Partition</button>
-    <button onclick="executeExtendedPartition()" style="background:#f0a500;color:#000;font-weight:bold;padding:6px 12px;border-radius:4px;border:none;cursor:pointer;">Extended Partition</button>
+    <button onclick="executeRepartition()" style="background:#f0a500;color:#000;font-weight:bold;padding:6px 12px;border-radius:4px;border:none;cursor:pointer;">Repartition</button>
     <span class="zoom-info" id="zoomInfo">100% | Scroll=Zoom, MiddleDrag=Pan</span>
 </div>
 
@@ -933,28 +858,29 @@ async function executeAutoPartition() {
     }
 }
 
-async function executeExtendedPartition() {
+async function executeRepartition() {
     if (!caseData || !currentCaseId) { addLog('No case loaded', true); return; }
-    addLog(`Extended Partition: case=${currentCaseId}`);
+    const tritonUrl = document.getElementById('tritonUrl').value.trim();
+    addLog(`Repartition: case=${currentCaseId}, triton=${tritonUrl || '(fallback)'}`);
 
     try {
-        const resp = await fetch('/api/extended_partition', {
+        const resp = await fetch('/api/repartition', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ case_id: currentCaseId }),
+            body: JSON.stringify({ case_id: currentCaseId, triton_url: tritonUrl }),
         });
         const data = await resp.json();
         if (data.ok) {
-            addLog(`Extended Partition OK: ${data.rooms.length} rooms`, false, true);
+            addLog(`Repartition OK: ${data.rooms.length} rooms`, false, true);
             caseData.rooms = data.rooms;
             updateRoomList();
             drawMap();
             document.getElementById('infoRooms').textContent = data.rooms.length;
         } else {
-            addLog(`Extended Partition FAIL: ${data.error}`, true);
+            addLog(`Repartition FAIL: ${data.error}`, true);
         }
     } catch (e) {
-        addLog(`Extended Partition Error: ${e.message}`, true);
+        addLog(`Repartition Error: ${e.message}`, true);
     }
 }
 

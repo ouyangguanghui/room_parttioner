@@ -570,6 +570,7 @@ class TestProcess:
             "map_img": map_img,
             "robot_model": "s10",
             "uuid": "test-uuid",
+            "input_img": map_img,
             "labels_json": {
                 "data": [
                     {"name": "A", "id": "ROOM_001", "type": "polygon",
@@ -578,7 +579,6 @@ class TestProcess:
                 ]
             },
         }
-        meta = {"map_data": map_img, "input_data": map_img}
 
         with patch.object(ep, "detect_new_regions") as mock_detect, \
              patch.object(ep, "extend_pixel") as mock_ext, \
@@ -595,7 +595,7 @@ class TestProcess:
             MockExp.return_value = mock_exp
 
             result = ep.process(
-                map_data, meta, mock_transformer,
+                map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 
@@ -616,6 +616,7 @@ class TestProcess:
             "map_img": map_img,
             "robot_model": "s10",
             "uuid": "test-uuid",
+            "input_img": map_img,
             "labels_json": {
                 "data": [
                     {"name": "A", "id": "ROOM_001", "type": "polygon",
@@ -624,7 +625,6 @@ class TestProcess:
                 ]
             },
         }
-        meta = {"map_data": map_img, "input_data": map_img}
 
         new_regions = np.zeros((30, 30), dtype=np.int32)
         new_regions[25:29, 25:29] = 1  # 一个新区域
@@ -642,7 +642,7 @@ class TestProcess:
             MockExp.return_value = mock_exp
 
             result = ep.process(
-                map_data, meta, mock_transformer,
+                map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 
@@ -664,6 +664,7 @@ class TestProcess:
             "map_img": map_img,
             "robot_model": "S-K20PRO",
             "uuid": "k20-uuid",
+            "input_img": map_img,
             "labels_json": {
                 "data": [
                     {"name": "A", "id": "ROOM_001", "type": "polygon",
@@ -672,7 +673,6 @@ class TestProcess:
                 ]
             },
         }
-        meta = {"map_data": map_img, "input_data": map_img}
 
         lm = np.zeros((30, 30), dtype=np.int32)
         lm[5:20, 5:20] = 1
@@ -686,7 +686,7 @@ class TestProcess:
             MockExp.return_value = mock_exp
 
             result = ep.process(
-                map_data, meta, mock_transformer,
+                map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 

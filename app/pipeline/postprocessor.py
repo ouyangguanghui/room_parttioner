@@ -38,17 +38,17 @@ class Postprocessor:
         self.max_extend = self.config.get("max_extend", 3.0)  # 最大延伸像素距离
         self.thickness = self.config.get("thickness", 2)
 
-    def process(self, raw_output: List[List[int]], meta: Dict[str, Any]) -> Dict[str, Any]:
-        f"""
+    def process(self, raw_output: List[List[int]], map_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
         后处理流水线
 
         Args:
             raw_output: 模型原始输出 OBB 列表，每个元素为 4 个顶点 [[x,y], ...]
-            meta:
-                map_data:      去噪但未补墙的地图（自由空间判断备用
-                input_data:    补墙平滑后的地图
+            map_data: 地图数据字典
+                input_img:     补墙平滑后的灰度地图 (H, W) uint8
                 tensor_scale:  (可选) letterbox 缩放比，用于 OBB 坐标逆映射
                 tensor_pad:    (可选) (pad_top, pad_left) letterbox 填充，用于逆映射
+                pre_pad:       (可选) (pad_top, pad_left) 小图预填充偏移
 
         Returns:
             Dict[str, Any]:
@@ -56,17 +56,17 @@ class Postprocessor:
                 "threshold_list": 延伸后的分割线端点列表 [[(x1,y1), (x2,y2)], ...],
                 "thickness_size" : 分割线粗细
         """
-        map_data  = meta["map_data"]
+        input_img = map_data["input_img"]
 
         # step 1: OBB 坐标逆映射 + 画 threshold 线掩膜
-        threshold_result = self._build_threshold_mask(raw_output, map_data, meta)
+        threshold_result = self._build_threshold_mask(raw_output, input_img, map_data)
         threshold_mask = threshold_result["threshold_mask"]
 
         # step 2: threshold 线切割自由空间 → 连通域标记
-        room_map = self._split_by_threshold(threshold_mask, map_data)
+        room_map = self._split_by_threshold(threshold_mask, input_img)
 
         # step 3: 按面积阈值拆分 → 正常区域图 + 碎片图
-        normal_map, small_map = self._split_by_area(room_map, map_data)
+        normal_map, small_map = self._split_by_area(room_map, input_img)
 
         # step 4: 碎片合并
         room_map = self._merge_fragments(normal_map, small_map)
@@ -82,41 +82,27 @@ class Postprocessor:
     def _build_threshold_mask(
         self,
         obb_list: List[List[int]],
-        map_data: np.ndarray,
-        meta: Dict[str, Any] = None,
+        input_img: np.ndarray,
+        map_data: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         将 OBB 列表转换为 threshold 线掩膜。
 
-        若 meta 中含有 tensor_scale / tensor_pad，则先将 OBB 顶点坐标从
+        若 map_data 中含有 tensor_scale / tensor_pad，则先将 OBB 顶点坐标从
         Triton 输入空间（letterboxed）逆映射回原始地图像素坐标，再画线。
-
-        流程 (每个 OBB):
-            1. 坐标逆映射: tensor 空间 → 原始地图空间
-            2. obb_to_line: OBB 四顶点 → 还原原始线段 (p1, p2) + 方向
-            3. extend_line: 从 p1, p2 沿线段方向向外延伸至非自由像素
-            4. 画线到掩膜
 
         Args:
             obb_list: OBB 列表, 每个 OBB 为 4 个顶点 [[x,y], ...]
-                      坐标可能处于 tensor 空间，需通过 meta 逆映射
-            map_data: 地图数据 (灰度图, >=200 为自由空间)
-            meta:     (可选) 含 tensor_scale / tensor_pad 的字典
-
-        Returns:
-            {
-                "threshold_mask": (H, W) uint8, 255=threshold 线, 0=其他,
-                "threshold_list": 延伸后的分割线端点列表 [[(x1,y1), (x2,y2)], ...],
-                "line_list": OBB 还原的原始线段列表 [[(x1,y1), (x2,y2)], ...],
-            }
+            input_img: 地图数据 (灰度图, >=200 为自由空间)
+            map_data: (可选) 含 tensor_scale / tensor_pad / pre_pad 的字典
         """
-        h, w = map_data.shape[:2]
-        free_mask = map_data >= 200
+        h, w = input_img.shape[:2]
+        free_mask = input_img >= 200
 
         # 解析坐标逆映射参数
-        scale    = (meta or {}).get("tensor_scale", 1.0)
-        pad_top, pad_left = (meta or {}).get("tensor_pad", (0, 0))
-        pre_pad_top, pre_pad_left = (meta or {}).get("pre_pad", (0, 0))
+        scale    = (map_data or {}).get("tensor_scale", 1.0)
+        pad_top, pad_left = (map_data or {}).get("tensor_pad", (0, 0))
+        pre_pad_top, pre_pad_left = (map_data or {}).get("pre_pad", (0, 0))
         need_remap = (scale != 1.0 or pad_top != 0 or pad_left != 0 or pre_pad_top != 0 or pre_pad_left != 0)
 
         threshold_mask = np.zeros((h, w), dtype=np.uint8)

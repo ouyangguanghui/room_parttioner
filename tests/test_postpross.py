@@ -56,7 +56,7 @@ def test_process_returns_room_map_and_threshold_info():
     pp = Postprocessor({"min_room_area": 1.0, "resolution": 0.1, "max_extend": 30, "thickness": 1})
     m = _build_test_map(48, 48)
     raw_output = [[[10, 26], [38, 26], [38, 22], [10, 22]]]
-    out = pp.process(raw_output, {"map_data": m})
+    out = pp.process(raw_output, {"input_img": m})
     assert set(out.keys()) == {"room_map", "threshold_list", "thickness_size"}
     assert out["room_map"].shape == m.shape
     assert out["thickness_size"] == 1

@@ -96,36 +96,42 @@ class RoomService:
             RoomPartitionerError 子类: 各服务内部业务错误
         """
         # step1: 校验基础参数
+        logger.info(f"step1 : start check base parameters")
         resolution = map_data.get("resolution", 0)
         if not resolution or resolution <= 0:
             raise InvalidResolutionError()
-
+        logger.info(f">>>>>>>> step1 : check base parameters success")
         labels_json = map_data.get("labels_json")
-
+        logger.info(f">>>>>>>> step1 : check labels_json success")
         # step2: 预处理
+
+        logger.info(f">>>>>>>> step2 : start preprocess")
         meta = self._preprocess(map_data["map_img"])
-        logger.info(f"预处理完成, operation={operation}")
+        logger.info(f">>>>>>>> step2 : preprocess success, operation={operation}")
 
         # step3: 创建公共工具
+        logger.info(f">>>>>>>> step3 : start create public tools")
         map_img = map_data["map_img"]
         height = map_img.shape[0]
         origin = map_data.get("origin", [0, 0])
+        map_data["cleaned_img"] = meta["cleaned_img"]
+        map_data["cleaned_img2"] = meta["cleaned_img2"]
+        map_data["input_img"] = meta["input_img"]
 
         transformer = CoordinateTransformer(resolution, origin, height)
         graph_builder = RoomGraph(self.config)
         landmark_builder = LandmarkManager(self.config)
-
+        logger.info(f">>>>>>>> step3 : create public tools success")
         # step4: 按操作路由
         if operation == "split":
             return self._handle_split(
-                map_data, meta, labels_json,
+                map_data, labels_json,
                 transformer, graph_builder, landmark_builder,
             )
 
         if operation == "repartition":
             return self._handle_repartition(
-                map_data, meta,
-                transformer, graph_builder, landmark_builder,
+                map_data, transformer, graph_builder, landmark_builder,
             )
 
         if operation == "division":
@@ -149,7 +155,7 @@ class RoomService:
         地图预处理：BGR → 灰度 → Preprocessor.process()
 
         Returns:
-            meta: {"map_data": ..., "input_data": ...}
+            {"cleaned_img": ..., "cleaned_img2": ..., "input_img": ...}
         """
         if map_img.ndim == 3:
             gray = cv2.cvtColor(map_img, cv2.COLOR_BGR2GRAY)
@@ -163,7 +169,6 @@ class RoomService:
     def _handle_split(
         self,
         map_data: Dict[str, Any],
-        meta: Dict[str, Any],
         labels_json: Optional[Dict[str, Any]],
         transformer: CoordinateTransformer,
         graph_builder: RoomGraph,
@@ -183,19 +188,18 @@ class RoomService:
         if has_labels:
             logger.info("split: 已有 labels, 走扩展分区")
             return self.extended_partitioner.process(
-                map_data, meta, transformer, graph_builder, landmark_builder,
+                map_data, transformer, graph_builder, landmark_builder,
             )
 
         logger.info("split: 无 labels, 走自动分区")
         return self.auto_partitioner.process(
-            map_data, meta, transformer, graph_builder, landmark_builder,
+            map_data, transformer, graph_builder, landmark_builder,
             repartition=False,
         )
 
     def _handle_repartition(
         self,
         map_data: Dict[str, Any],
-        meta: Dict[str, Any],
         transformer: CoordinateTransformer,
         graph_builder: RoomGraph,
         landmark_builder: LandmarkManager,
@@ -203,7 +207,7 @@ class RoomService:
         """repartition 操作：强制重新分区 (忽略已有 labels)"""
         logger.info("repartition: 强制重新分区")
         return self.auto_partitioner.process(
-            map_data, meta, transformer, graph_builder, landmark_builder,
+            map_data, transformer, graph_builder, landmark_builder,
             repartition=True,
         )
 

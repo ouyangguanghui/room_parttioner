@@ -55,9 +55,10 @@ class Preprocessor:
             img: 原始栅格地图 (H, W) uint8
 
         Returns:
-            meta 字典:
-                "map_data":   补墙平滑后的地图 (H, W) uint8，用于自由空间判断和模型张量准备
-                "input_data": 去噪但未补墙的地图，作为自由空间判断的备用
+            字典:
+                "cleaned_img":  去噪后的地图 (H, W) uint8
+                "cleaned_img2": 去噪+去未知噪点后的地图 (H, W) uint8
+                "input_img":    补墙平滑后的地图 (H, W) uint8，用于自由空间判断和模型张量准备
         """
         viz_data = {}
         viz_status = True if self._viz_dir else False
@@ -91,8 +92,9 @@ class Preprocessor:
             self._save_visualization(viz_data)
 
         return {
-            "map_data": cleaned2,
-            "input_data": result,
+            "cleaned_img" : cleaned,
+            "cleaned_img2" : cleaned2,
+            "input_img": result,
         }
 
     # ========== Step 1: 去除内部噪点 ==========

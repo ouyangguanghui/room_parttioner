@@ -12,7 +12,7 @@
   - extend_pixel: 完整像素级流程 (门口拆分 + 区域生长)
 
 process() 入口签名与 AutoPartitioner / ManualPartitioner 保持一致:
-  process(map_data, meta, transformer, graph_builder, landmark_builder) -> labels_json
+  process(map_data, transformer, graph_builder, landmark_builder) -> labels_json
 """
 
 import logging
@@ -410,7 +410,6 @@ class ExtendedPartitioner:
     def process(
         self,
         map_data: Dict[str, Any],
-        meta: Dict[str, Any],
         transformer: CoordinateTransformer,
         graph_builder: RoomGraph,
         landmark_builder: LandmarkManager,
@@ -426,7 +425,7 @@ class ExtendedPartitioner:
                 "uuid": UUID str
                 "markers_json": 标记信息 json
                 "world_charge_pose": 充电桩世界坐标 [x, y, z]
-            meta: 预处理结果 {"map_data": ..., "input_data": ...}
+                "input_img": 补墙平滑后的灰度地图 (H, W) uint8
             transformer: 坐标变换器
             graph_builder: 邻接图构建器
             landmark_builder: 标记点管理器
@@ -435,7 +434,7 @@ class ExtendedPartitioner:
             Dict[str, Any]: labels_json 格式
         """
         map_img = map_data["map_img"]
-        grid_map = meta["map_data"]
+        grid_map = map_data["input_img"]
         robot_model = map_data.get("robot_model", "s10")
         labels_json = map_data.get("labels_json", {})
 

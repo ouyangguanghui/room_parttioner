@@ -138,17 +138,20 @@ def run_inference(case_dir: Path, config: Dict[str, Any],
 
     # 2. 预处理
     preprocessor = Preprocessor(config)
-    meta = preprocessor.process(gray)
-    logger.info(f"预处理完成: map_data shape={meta['map_data'].shape}, "
-                f"input_data shape={meta['input_data'].shape}")
+    preprocess_result = preprocessor.process(gray)
+    map_data["cleaned_img"] = preprocess_result["cleaned_img"]
+    map_data["cleaned_img2"] = preprocess_result["cleaned_img2"]
+    map_data["input_img"] = preprocess_result["input_img"]
+    logger.info(f"预处理完成: cleaned_img shape={map_data['cleaned_img'].shape}, "
+                f"input_img shape={map_data['input_img'].shape}")
 
     # 3. 准备张量
     partitioner = AutoPartitioner(config)
-    tensor = partitioner._prepare_tensor(meta["input_data"], meta)
+    tensor = partitioner._prepare_tensor(map_data["input_img"], map_data)
     logger.info(f"张量: shape={tensor.shape}, dtype={tensor.dtype}, "
                 f"range=[{tensor.min():.3f}, {tensor.max():.3f}]")
-    logger.info(f"  tensor_scale={meta.get('tensor_scale')}, "
-                f"tensor_pad={meta.get('tensor_pad')}")
+    logger.info(f"  tensor_scale={map_data.get('tensor_scale')}, "
+                f"tensor_pad={map_data.get('tensor_pad')}")
 
     # 4. Triton 推理
     inferencer = Inferencer(config)
@@ -173,7 +176,7 @@ def run_inference(case_dir: Path, config: Dict[str, Any],
 
     # 6. 后处理
     postprocessor = Postprocessor(config)
-    result = postprocessor.process(obb_list, meta)
+    result = postprocessor.process(obb_list, map_data)
     room_map = result["room_map"]
     threshold_list = result["threshold_list"]
 
@@ -182,11 +185,11 @@ def run_inference(case_dir: Path, config: Dict[str, Any],
 
     # 7. 可视化输出
     if save_path or True:  # 始终生成可视化
-        h, w = meta["map_data"].shape[:2]
+        h, w = map_data["input_img"].shape[:2]
 
         # 创建 2x2 对比图
         # (1) 原图 (2) OBB 检测 (3) threshold 线 (4) 房间分区
-        orig_bgr = cv2.cvtColor(meta["input_data"], cv2.COLOR_GRAY2BGR)
+        orig_bgr = cv2.cvtColor(map_data["input_img"], cv2.COLOR_GRAY2BGR)
 
         # OBB 叠加（需要逆映射回原图坐标）
         obb_vis = draw_obb_overlay(orig_bgr, obb_list)

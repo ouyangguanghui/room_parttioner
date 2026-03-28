@@ -34,8 +34,9 @@ def service(config):
     with patch("app.services.services.Preprocessor") as MockPP:
         mock_pp = MagicMock()
         mock_pp.process.return_value = {
-            "map_data": np.full((20, 20), 200, dtype=np.uint8),
-            "input_data": np.full((20, 20), 200, dtype=np.uint8),
+            "cleaned_img": np.full((20, 20), 200, dtype=np.uint8),
+            "cleaned_img2": np.full((20, 20), 200, dtype=np.uint8),
+            "input_img": np.full((20, 20), 200, dtype=np.uint8),
         }
         MockPP.return_value = mock_pp
         svc = RoomService(config)
@@ -121,8 +122,9 @@ class TestPreprocess:
     def test_returns_meta(self, service):
         gray = np.full((10, 10), 128, dtype=np.uint8)
         meta = service._preprocess(gray)
-        assert "map_data" in meta
-        assert "input_data" in meta
+        assert "cleaned_img" in meta
+        assert "cleaned_img2" in meta
+        assert "input_img" in meta
 
 
 # ==================== TestInvalidResolution ====================
@@ -281,8 +283,9 @@ class TestEndToEnd:
         def mock_preprocess(gray):
             call_order.append("preprocess")
             return {
-                "map_data": np.full((20, 20), 200, dtype=np.uint8),
-                "input_data": np.full((20, 20), 200, dtype=np.uint8),
+                "cleaned_img": np.full((20, 20), 200, dtype=np.uint8),
+                "cleaned_img2": np.full((20, 20), 200, dtype=np.uint8),
+                "input_img": np.full((20, 20), 200, dtype=np.uint8),
             }
 
         def mock_auto_process(*args, **kwargs):
