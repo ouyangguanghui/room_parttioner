@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 class AutoPartitioner:
     """
-    自动分区：推理 → 后处理 → 扩展分区 → 轮廓提取 → 图着色 → 序列化
+    自动分区：推理 → 后处理 → 扩展分区 → 轮廓提取 → 图着色 → 序列化 
 
     当 Triton 不可用时，fallback 到传统连通域方法。
     """
@@ -52,6 +52,7 @@ class AutoPartitioner:
 
         # 张量准备参数
         self.target_size: List[int] = self.config.get("target_size", [512, 512])
+        self.min_input_size: int = self.config.get("min_input_size", 416)
         self.normalize: bool = self.config.get("normalize", True)
         self.mean = self.config.get("mean", [0.485, 0.456, 0.406])
         self.std = self.config.get("std", [0.229, 0.224, 0.225])
@@ -160,14 +161,27 @@ class AutoPartitioner:
 
         h, w = img_bgr.shape[:2]
 
+        min_sz = self.min_input_size
+        pre_pad = (0, 0)
+        if h < min_sz and w < min_sz:
+            # 小图先居中 pad 到 min_input_size
+            pad_top_pre = (min_sz - h) // 2
+            pad_left_pre = (min_sz - w) // 2
+            padded = np.full((min_sz, min_sz, 3), 127, dtype=img_bgr.dtype)
+            padded[pad_top_pre:pad_top_pre + h, pad_left_pre:pad_left_pre + w] = img_bgr
+            img_bgr = padded
+            pre_pad = (pad_top_pre, pad_left_pre)
+
+        h, w = img_bgr.shape[:2]
+
         # Letterbox: 等比缩放, 短边 pad 至 target
         scale = min(tw / w, th / h)
         nw, nh = int(round(w * scale)), int(round(h * scale))
-        resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_NEAREST)
 
         pad_top = (th - nh) // 2
         pad_left = (tw - nw) // 2
-        canvas = np.full((th, tw, 3), 114, dtype=np.uint8)
+        canvas = np.full((th, tw, 3), 127, dtype=np.uint8)
         canvas[pad_top:pad_top + nh, pad_left:pad_left + nw] = resized
 
         # 归一化
@@ -186,6 +200,7 @@ class AutoPartitioner:
         meta["tensor_scale"] = scale
         meta["tensor_pad"] = (pad_top, pad_left)
         meta["tensor_size"] = (th, tw)
+        meta["pre_pad"] = pre_pad
 
         return tensor
 

@@ -55,8 +55,8 @@ class Inferencer:
         self.output_name = self.config.get("output_name", "output")
 
         # 解码参数
-        self.conf_threshold = self.config.get("conf_threshold", 0.6)
-        self.nms_threshold = self.config.get("nms_threshold", 0.1)
+        self.conf_threshold = self.config.get("conf_threshold", 0.1)
+        self.nms_threshold = self.config.get("nms_threshold", 0.35)
         self.output_format = self.config.get("output_format", "yolo_obb")
 
     # ==================== 健康检查 ====================
@@ -147,7 +147,7 @@ class Inferencer:
             scores = confs.tolist()
             obbs = self._nms_obb(obbs, scores, self.nms_threshold)
 
-        logger.info("YOLO-OBB 解码: %d 个 OBB (conf >= %.2f)", len(obbs), self.conf_threshold)
+        logger.info("YOLO-OBB 解码: %d 个 OBB (conf >= %.2f), nms_threshold=%.2f", len(obbs), self.conf_threshold, self.nms_threshold)
         return obbs
 
     def _decode_xyxyxyxy(self, raw: np.ndarray) -> List[List[List[float]]]:
@@ -186,8 +186,8 @@ class Inferencer:
             scores = preds[:, 8].tolist()
             obbs = self._nms_obb(obbs, scores, self.nms_threshold)
 
-        logger.info("解码完成: %d 个 OBB (conf >= %.2f)",
-                     len(obbs), self.conf_threshold)
+        logger.info("解码完成: %d 个 OBB (conf >= %.2f), nms_threshold=%.2f",
+                     len(obbs), self.conf_threshold, self.nms_threshold)
         return obbs
 
     def _decode_xywha(self, raw: np.ndarray) -> List[List[List[float]]]:

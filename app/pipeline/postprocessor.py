@@ -116,17 +116,19 @@ class Postprocessor:
         # 解析坐标逆映射参数
         scale    = (meta or {}).get("tensor_scale", 1.0)
         pad_top, pad_left = (meta or {}).get("tensor_pad", (0, 0))
-        need_remap = (scale != 1.0 or pad_top != 0 or pad_left != 0)
+        pre_pad_top, pre_pad_left = (meta or {}).get("pre_pad", (0, 0))
+        need_remap = (scale != 1.0 or pad_top != 0 or pad_left != 0 or pre_pad_top != 0 or pre_pad_left != 0)
 
         threshold_mask = np.zeros((h, w), dtype=np.uint8)
         threshold_list = []
         line_list = []
 
         for obb in obb_list or []:
-            # 1) 坐标逆映射：tensor 空间 → 原始地图像素空间
+            # 1) 坐标逆映射：tensor 空间 → letterbox undo → pre-pad undo → 原始地图像素空间
             if need_remap:
                 obb = [
-                    [(pt[0] - pad_left) / scale, (pt[1] - pad_top) / scale]
+                    [(pt[0] - pad_left) / scale - pre_pad_left,
+                     (pt[1] - pad_top) / scale - pre_pad_top]
                     for pt in obb
                 ]
 

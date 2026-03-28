@@ -219,7 +219,7 @@ def run_inference(case_dir: Path, config: Dict[str, Any],
         for x, y, text in titles:
             cv2.putText(canvas, text, (x, y), font, 0.6, (0, 255, 0), 2)
 
-        out_path = save_path or f"tests/output/infer_case_{case_dir.name}.png"
+        out_path = save_path or f"dataset/output/infer_case_{case_dir.name}.png"
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(out_path, canvas)
         logger.info(f"可视化保存: {out_path}")
@@ -240,7 +240,7 @@ def main():
                         help="Triton gRPC 地址")
     parser.add_argument("--protocol", type=str, default="grpc",
                         choices=["grpc", "http"])
-    parser.add_argument("--conf", type=float, default=0.5,
+    parser.add_argument("--conf", type=float, default=0.2,
                         help="置信度阈值")
     parser.add_argument("--save", type=str, default=None,
                         help="保存可视化到指定路径")

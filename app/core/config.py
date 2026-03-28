@@ -15,6 +15,7 @@ _DEFAULT_CONFIG = {
     "model_version_tag": "0.0.1",
     # 前处理
     "target_size": [512, 512],
+    "min_input_size": 416,
     "normalize": True,
     "mean": [0.485, 0.456, 0.406],
     "std": [0.229, 0.224, 0.225],
@@ -56,6 +57,7 @@ _ENV_MAP = {
     "LINE_THICKNESS": ("line_thickness", int),
     "MORPH_KERNEL_SIZE": ("morph_kernel_size", int),
     "NORMALIZE": ("normalize", lambda x: x.lower() in ("1", "true", "yes")),
+    "MIN_INPUT_SIZE": ("min_input_size", int),
 }
 
 

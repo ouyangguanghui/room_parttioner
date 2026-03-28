@@ -3,7 +3,8 @@ service_version: "4.0.2"          # 服务版本
 model_version_tag: "0.0.1"       # 模型版本
 
 # ---- 前处理 ----
-target_size: [1024, 1024]
+target_size: [1280, 1280]
+min_input_size: 416              # 小图先居中 pad 到此尺寸再 letterbox
 normalize: false              # YOLOv8 仅需 /255.0, 无需 ImageNet 标准化
 mean: [0.485, 0.456, 0.406]
 std: [0.229, 0.224, 0.225]
@@ -17,8 +18,8 @@ triton_protocol: "grpc"      # grpc 或 http
 input_name: "images"
 output_name: "output0"
 output_format: "yolo_obb"    # yolo_obb | xywha | xyxyxyxy
-conf_threshold: 0.5
-nms_threshold: 0.45
+conf_threshold: 0.1
+nms_threshold: 0.35
 
 # ---- 后处理 ----
 morph_kernel_size: 5          # 形态学核大小
