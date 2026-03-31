@@ -19,7 +19,7 @@ import numpy as np
 
 from app.pipeline.triton_client import TritonClient
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(f"{__name__} [Inferencer]")
 
 
 class Inferencer:
@@ -77,7 +77,9 @@ class Inferencer:
         Returns:
             OBB 列表, 每个 OBB 为 4 个顶点 [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
         """
+        logger.info(f"start infer")
         raw = self.client.infer(tensor, self.input_name, self.output_name)
+        logger.info(f"infer success")
         return self.decode(raw)
 
     def run_raw(self, tensor: np.ndarray) -> np.ndarray:
@@ -96,6 +98,7 @@ class Inferencer:
         Returns:
             [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], ...]
         """
+        logger.info(f"start decode")
         if self.output_format == "yolo_obb":
             return self._decode_yolo_obb(raw_output)
         elif self.output_format == "xywha":
@@ -148,6 +151,7 @@ class Inferencer:
             obbs = self._nms_obb(obbs, scores, self.nms_threshold)
 
         logger.info("YOLO-OBB 解码: %d 个 OBB (conf >= %.2f), nms_threshold=%.2f", len(obbs), self.conf_threshold, self.nms_threshold)
+        logger.info(f"decode success")
         return obbs
 
     def _decode_xyxyxyxy(self, raw: np.ndarray) -> List[List[List[float]]]:

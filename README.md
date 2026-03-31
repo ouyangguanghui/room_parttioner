@@ -30,7 +30,7 @@ RoomPartitioner/
 │       ├── graph.py                 # 邻接图 + 五色着色 + DFS 排序
 │       ├── landmark.py              # 平台标记点生成
 │       ├── s3_loader.py             # S3 / 本地数据加载
-│       ├── contour_expander.py      # 轮廓外扩
+│       ├── labels_ops.py            # 轮廓外扩
 │       ├── beautifier.py            # 轮廓美化（bbox + 门槛线）
 │       └── common.py                # 通用验证工具
 ├── config/

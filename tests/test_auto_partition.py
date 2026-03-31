@@ -31,7 +31,7 @@ def partitioner(config):
 def partitioner_with_triton(config):
     """带 Triton 的 AutoPartitioner"""
     config["triton_url"] = "localhost:8001"
-    with patch("app.services.auto_partition.Inferencer") as MockInf:
+    with patch("app.services.base_partitioner.Inferencer") as MockInf:
         mock_inf = MagicMock()
         MockInf.return_value = mock_inf
         p = AutoPartitioner(config)
@@ -94,7 +94,7 @@ class TestInit:
         assert p.mean == [0.485, 0.456, 0.406]
 
     def test_triton_inferencer_created(self):
-        with patch("app.services.auto_partition.Inferencer") as MockInf:
+        with patch("app.services.base_partitioner.Inferencer") as MockInf:
             AutoPartitioner({"triton_url": "localhost:8001"})
             MockInf.assert_called_once()
 
@@ -203,13 +203,13 @@ class TestContoursToLabelMap:
         lm[5:20, 5:20] = 1
         lm[5:20, 25:40] = 2
         contours = AutoPartitioner._extract_contours(lm)
-        new_lm = AutoPartitioner._contours_to_label_map(contours, (50, 50))
-        assert new_lm.max() >= 2
+        new_lm_free, new_lm = AutoPartitioner._contours_to_label_map(contours, np.full((50, 50), 255, dtype=np.uint8), (50, 50))
+        assert new_lm_free.max() >= 2
 
     def test_empty_contours(self):
-        result = AutoPartitioner._contours_to_label_map([], (10, 10))
-        assert result.max() == 0
-        assert result.shape == (10, 10)
+        result_free, result = AutoPartitioner._contours_to_label_map([], np.full((10, 10), 255, dtype=np.uint8), (10, 10))
+        assert result_free.max() == 0
+        assert result_free.shape == (10, 10)
 
 
 # ==================== TestToGray ====================
@@ -269,37 +269,36 @@ class TestPartition:
         map_data[2:8, 2:8] = 255
         map_data_dict = {"input_img": map_data}
 
+        mock_polygons = [[[2, 2], [8, 2], [8, 8], [2, 8]]]
         with patch.object(partitioner, "_fallback_partition") as mock_fb:
-            mock_fb.return_value = np.array([[0, 1], [2, 0]], dtype=np.int32)
+            mock_fb.return_value = mock_polygons
             result = partitioner.partition(map_data_dict, extend=False)
             mock_fb.assert_called_once()
-            assert "label_map" in result
-            assert "contours" in result
+            assert isinstance(result, list)
 
     def test_partition_infer_path(self, partitioner_with_triton):
         p = partitioner_with_triton
         p._mock_inferencer.is_ready.return_value = True
 
+        mock_polygons = [[[0, 0], [10, 0], [10, 5], [0, 5]],
+                         [[0, 5], [10, 5], [10, 10], [0, 10]]]
         with patch.object(p, "_infer_partition") as mock_infer:
-            lm = np.zeros((10, 10), dtype=np.int32)
-            lm[0:5, :] = 1
-            lm[5:10, :] = 2
-            mock_infer.return_value = (lm, [{"threshold": 0.5}], 2)
+            mock_infer.return_value = mock_polygons
             map_data_dict = {"input_img": np.zeros((10, 10), dtype=np.uint8)}
             result = p.partition(map_data_dict, extend=False)
             mock_infer.assert_called_once()
-            assert result["thickness_size"] == 2
+            assert isinstance(result, list)
+            assert len(result) == 2
 
     def test_partition_with_extend(self, partitioner):
-        """extend=True 时不再调用 extended.extend_pixel，仅做 relabel + 提取轮廓"""
+        """extend=True 时走 fallback 路径"""
         map_data_dict = {"input_img": np.zeros((10, 10), dtype=np.uint8)}
+        mock_polygons = [[[0, 0], [1, 0], [1, 1], [0, 1]]]
         with patch.object(partitioner, "_fallback_partition") as mock_fb:
-            lm = np.array([[0, 1], [2, 0]], dtype=np.int32)
-            mock_fb.return_value = lm
+            mock_fb.return_value = mock_polygons
             result = partitioner.partition(map_data_dict, extend=True)
             mock_fb.assert_called_once()
-            assert "label_map" in result
-            assert "contours" in result
+            assert isinstance(result, list)
 
 
 # ==================== TestExpandContours ====================
@@ -558,18 +557,11 @@ class TestProcess:
             "input_img": np.full((20, 20), 200, dtype=np.uint8),
         }
 
-        # Mock partition 返回
-        cnt = np.array([[[2, 2]], [[8, 2]], [[8, 8]], [[2, 8]]], dtype=np.int32)
+        # Mock partition 返回多边形列表
+        polygon = [[2, 2], [8, 2], [8, 8], [2, 8]]
         with patch.object(partitioner, "partition") as mock_part, \
-             patch.object(partitioner, "expand_contours") as mock_exp, \
              patch.object(partitioner, "beautify_contours") as mock_beauty:
-            mock_part.return_value = {
-                "label_map": np.ones((20, 20), dtype=np.int32),
-                "contours": [cnt],
-                "threshold_list": [],
-                "thickness_size": 2,
-            }
-            mock_exp.return_value = [cnt]
+            mock_part.return_value = [polygon]
             mock_beauty.return_value = (None, None)
 
             result = partitioner.process(
@@ -597,17 +589,10 @@ class TestProcess:
             "cleaned_img2": map_img,
         }
 
-        cnt = np.array([[[2, 2]], [[8, 2]], [[8, 8]], [[2, 8]]], dtype=np.int32)
+        polygon = [[2, 2], [8, 2], [8, 8], [2, 8]]
         with patch.object(partitioner, "partition") as mock_part, \
-             patch.object(partitioner, "expand_contours") as mock_exp, \
              patch.object(partitioner, "beautify_contours") as mock_beauty:
-            mock_part.return_value = {
-                "label_map": np.ones((20, 20), dtype=np.int32),
-                "contours": [cnt],
-                "threshold_list": [],
-                "thickness_size": 2,
-            }
-            mock_exp.return_value = [cnt]
+            mock_part.return_value = [polygon]
             mock_beauty.return_value = (None, None)
 
             partitioner.process(
@@ -636,18 +621,11 @@ class TestProcess:
             "cleaned_img2": map_img,
         }
 
-        cnt = np.array([[[2, 2]], [[8, 2]], [[8, 8]], [[2, 8]]], dtype=np.int32)
+        polygon = [[2, 2], [8, 2], [8, 8], [2, 8]]
 
         with patch.object(partitioner, "partition") as mock_part, \
-             patch.object(partitioner, "expand_contours") as mock_exp, \
              patch.object(partitioner, "beautify_contours") as mock_beauty:
-            mock_part.return_value = {
-                "label_map": np.ones((20, 20), dtype=np.int32),
-                "contours": [cnt],
-                "threshold_list": [],
-                "thickness_size": 2,
-            }
-            mock_exp.return_value = [cnt]
+            mock_part.return_value = [polygon]
             mock_beauty.return_value = (None, None)
 
             partitioner.process(
@@ -671,21 +649,14 @@ class TestProcess:
             "cleaned_img2": map_img,
         }
 
-        cnt = np.array([[[2, 2]], [[8, 2]], [[8, 8]], [[2, 8]]], dtype=np.int32)
+        polygon = [[2, 2], [8, 2], [8, 8], [2, 8]]
         mock_landmark_builder.generate_landmarks.return_value = [
             {"type": "pose", "id": "PLATFORM_LANDMARK_001"}
         ]
 
         with patch.object(partitioner, "partition") as mock_part, \
-             patch.object(partitioner, "expand_contours") as mock_exp, \
              patch.object(partitioner, "beautify_contours") as mock_beauty:
-            mock_part.return_value = {
-                "label_map": np.ones((20, 20), dtype=np.int32),
-                "contours": [cnt],
-                "threshold_list": [],
-                "thickness_size": 2,
-            }
-            mock_exp.return_value = [cnt]
+            mock_part.return_value = [polygon]
             mock_beauty.return_value = (None, None)
 
             result = partitioner.process(

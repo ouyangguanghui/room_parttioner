@@ -11,12 +11,12 @@ class TestConfigDefault:
         assert cfg["min_room_area"] == 1.0
         assert cfg["wall_threshold"] == 128
         assert cfg["resolution"] == 0.05
-        assert cfg["triton_url"] == ""
+        assert cfg["triton_url"] == "192.168.2.55:8001"
         assert cfg["model_name"] == "room_seg"
 
     def test_target_size_default(self):
         cfg = load_config()
-        assert cfg["target_size"] == [512, 512]
+        assert cfg["target_size"] == [1280, 1280]
 
 
 class TestConfigYaml:

@@ -159,6 +159,17 @@ class TestGrowUnassigned:
         assert result[0, 0] == 0
         assert result[15, 15] == 0
 
+    def test_competing_pixel_prefers_lower_label(self):
+        """竞争像素应稳定分配给较小 label，避免遍历顺序抖动。"""
+        ep = ExtendedPartitioner({"grow_iterations": 1, "wall_threshold": 128})
+        lm = np.zeros((7, 7), dtype=np.int32)
+        lm[3, 2] = 1
+        lm[3, 4] = 2
+        gm = np.full((7, 7), 255, dtype=np.uint8)
+
+        result = ep.grow_unassigned(lm, gm)
+        assert result[3, 3] == 1
+
 
 # ==================== TestExtendPixel ====================
 
@@ -185,6 +196,18 @@ class TestExtendPixel:
             mock_ext.return_value = lm
             ep.extend(lm, gm)
             mock_ext.assert_called_once_with(lm, gm)
+
+    def test_extend_pixel_is_idempotent(self):
+        """同一输入重复执行应稳定，不应持续漂移。"""
+        ep = ExtendedPartitioner({"grow_iterations": 10, "wall_threshold": 128})
+        lm = np.zeros((20, 40), dtype=np.int32)
+        lm[2:18, 2:15] = 1
+        lm[2:18, 17:38] = 2
+        gm = np.full((20, 40), 255, dtype=np.uint8)
+
+        once = ep.extend_pixel(lm, gm)
+        twice = ep.extend_pixel(once, gm)
+        np.testing.assert_array_equal(once, twice)
 
 
 # ==================== TestRegionGrow ====================
@@ -227,7 +250,7 @@ class TestDetectNewRegions:
         assert result.max() == 0
 
     def test_filters_small_regions(self):
-        """面积低于 min_new_region_area 的碎片应被过滤"""
+        """面积过滤已移除，所有新区域都应被检测到"""
         ep = ExtendedPartitioner({"min_new_region_area": 100, "wall_threshold": 128})
         lm = np.ones((50, 50), dtype=np.int32)
         # 在角落留一个 5x5 的小空白
@@ -235,7 +258,7 @@ class TestDetectNewRegions:
         gm = np.full((50, 50), 255, dtype=np.uint8)
 
         result = ep.detect_new_regions(lm, gm)
-        assert result.max() == 0  # 5x5=25 < 100，应被过滤
+        assert result.max() >= 1  # 5x5=25，不再过滤，应被检测到
 
     def test_all_walls(self, ep):
         """全墙壁不应检测到新区域"""
@@ -446,7 +469,7 @@ class TestBuildOldRoomMapping:
 
 class TestSerializeContours:
     def test_preserves_old_metadata(self, ep, mock_transformer):
-        """已有房间应保留原 name/id/groundMaterial"""
+        """已有房间应保留原 name/id/groundMaterial，colorType 用新计算值"""
         cnt = np.array([[[5, 5]], [[20, 5]], [[20, 20]], [[5, 20]]], dtype=np.int32)
         contours = [cnt]
         graph = {0: []}
@@ -466,6 +489,41 @@ class TestSerializeContours:
         assert result[0]["name"] == "客厅"
         assert result[0]["id"] == "ROOM_001"
         assert result[0]["groundMaterial"] == "wood"
+        assert result[0]["colorType"] == 2  # 使用新计算的颜色
+
+    def test_old_rooms_preserve_id_name_update_graph_color(self, ep, mock_transformer):
+        """serialize_contours 应保留旧房间 id/name/groundMaterial，更新 graph/colorType"""
+        cnt0 = np.array([[[5, 5]], [[20, 5]], [[20, 20]], [[5, 20]]], dtype=np.int32)
+        cnt1 = np.array([[[30, 5]], [[45, 5]], [[45, 20]], [[30, 20]]], dtype=np.int32)
+        contours = [cnt0, cnt1]
+        graph = {0: [1], 1: [0]}
+        colors = {0: 0, 1: 1}
+        order = [0, 1]
+        old_rooms = [
+            {"name": "A", "id": "ROOM_001", "type": "polygon",
+             "colorType": 3, "graph": [9], "groundMaterial": "wood"},
+            {"name": "B", "id": "ROOM_002", "type": "polygon",
+             "colorType": 4, "graph": [8], "groundMaterial": "tile"},
+        ]
+        old_mapping = {1: 0, 2: 1}
+
+        result = ep.serialize_contours(
+            contours, graph, colors, order,
+            mock_transformer, old_rooms, old_mapping,
+        )
+
+        # id/name/groundMaterial 保留
+        assert result[0]["id"] == "ROOM_001"
+        assert result[0]["name"] == "A"
+        assert result[0]["groundMaterial"] == "wood"
+        assert result[1]["id"] == "ROOM_002"
+        assert result[1]["name"] == "B"
+        assert result[1]["groundMaterial"] == "tile"
+        # graph/colorType 使用新计算值
+        assert result[0]["graph"] == [1]
+        assert result[1]["graph"] == [0]
+        assert result[0]["colorType"] == 0
+        assert result[1]["colorType"] == 1
 
     def test_new_room_gets_new_id(self, ep, mock_transformer):
         """新房间应获得新分配的 name/id"""
@@ -489,6 +547,9 @@ class TestSerializeContours:
         assert result[0]["id"] == "ROOM_001"
         assert result[1]["id"] == "ROOM_002"  # 新分配
         assert result[1]["name"] != "A"  # 不同于已有名称
+        assert result[0]["colorType"] == 0  # 旧房间保持原值
+        assert result[1]["colorType"] == 1  # 新房间使用新着色
+        assert result[1]["graph"] == [0]
 
 
 # ==================== TestRelabel ====================
@@ -520,9 +581,11 @@ class TestStaticUtils:
 
     def test_contours_to_label_map(self):
         cnt = np.array([[[5, 5]], [[15, 5]], [[15, 15]], [[5, 15]]], dtype=np.int32)
-        lm = ExtendedPartitioner._contours_to_label_map([cnt], (20, 20))
+        map_img = np.full((20, 20), 255, dtype=np.uint8)
+        lm_free, lm = ExtendedPartitioner._contours_to_label_map([cnt], map_img, (20, 20))
         assert lm.max() == 1
         assert lm[10, 10] == 1
+        assert lm_free[10, 10] == 1
 
     def test_to_gray_passthrough(self):
         gray = np.full((10, 10), 128, dtype=np.uint8)
@@ -558,65 +621,67 @@ class TestStaticUtils:
 # ==================== TestProcess ====================
 
 class TestProcess:
-    def test_full_pipeline_no_new_regions(
+    def test_no_new_regions_preserves_old_data(
         self, ep, mock_transformer, mock_graph_builder, mock_landmark_builder
     ):
-        """无新区域时仅执行扩展优化"""
-        map_img = np.full((30, 30), 200, dtype=np.uint8)
+        """无新区域时：id/name/geometry 不变，仅更新 graph/colorType"""
+        map_img = np.full((30, 30), 255, dtype=np.uint8)
         cnt = np.array([[[5, 5]], [[20, 5]], [[20, 20]], [[5, 20]]], dtype=np.int32)
         mock_transformer.rooms_data_to_contours.return_value = [cnt]
 
+        # mock graph_builder 返回值
+        mock_graph_builder.build_graph.return_value = {0: []}
+        mock_graph_builder.assign_colors.return_value = {0: 2}
+
+        old_geometry = [0, 0, 1, 0, 1, 1, 0, 1, 0, 0]
         map_data = {
-            "map_img": map_img,
+            "cleaned_img": map_img,
+            "cleaned_img2": map_img,
             "robot_model": "s10",
             "uuid": "test-uuid",
-            "input_img": map_img,
             "labels_json": {
                 "data": [
-                    {"name": "A", "id": "ROOM_001", "type": "polygon",
-                     "geometry": [0, 0, 1, 0, 1, 1, 0, 1, 0, 0],
-                     "colorType": 0, "graph": [], "groundMaterial": None},
+                    {"name": "MyRoom", "id": "ROOM_001", "type": "polygon",
+                     "geometry": old_geometry,
+                     "colorType": 0, "graph": [1], "groundMaterial": "wood"},
                 ]
             },
         }
 
-        with patch.object(ep, "detect_new_regions") as mock_detect, \
-             patch.object(ep, "extend_pixel") as mock_ext, \
-             patch("app.services.extended_partition.ContourExpander") as MockExp:
-
+        with patch.object(ep, "detect_new_regions") as mock_detect:
             mock_detect.return_value = np.zeros((30, 30), dtype=np.int32)
-
-            lm = np.zeros((30, 30), dtype=np.int32)
-            lm[5:20, 5:20] = 1
-            mock_ext.return_value = lm
-
-            mock_exp = MagicMock()
-            mock_exp.expand.return_value = [cnt]
-            MockExp.return_value = mock_exp
 
             result = ep.process(
                 map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 
-        assert "version" in result
         assert result["uuid"] == "test-uuid"
-        assert "data" in result
+        room = result["data"][0]
+        # id/name/geometry/groundMaterial 不变
+        assert room["id"] == "ROOM_001"
+        assert room["name"] == "MyRoom"
+        assert room["geometry"] == old_geometry
+        assert room["groundMaterial"] == "wood"
+        # graph 更新，colorType 无冲突则保留旧值
+        assert room["graph"] == []
+        assert room["colorType"] == 0  # 旧值 0，无邻居无冲突，保持不变
+        # 不调用 extend_pixel
         mock_detect.assert_called_once()
 
     def test_with_new_regions(
         self, ep, mock_transformer, mock_graph_builder, mock_landmark_builder
     ):
-        """有新区域时应调用 assign_new_regions"""
-        map_img = np.full((30, 30), 200, dtype=np.uint8)
+        """有新区域时应调用 assign_new_regions + extend_pixel"""
+        map_img = np.full((30, 30), 255, dtype=np.uint8)
         cnt = np.array([[[5, 5]], [[20, 5]], [[20, 20]], [[5, 20]]], dtype=np.int32)
         mock_transformer.rooms_data_to_contours.return_value = [cnt]
 
         map_data = {
-            "map_img": map_img,
+            "cleaned_img": map_img,
+            "cleaned_img2": map_img,
             "robot_model": "s10",
             "uuid": "test-uuid",
-            "input_img": map_img,
             "labels_json": {
                 "data": [
                     {"name": "A", "id": "ROOM_001", "type": "polygon",
@@ -634,7 +699,7 @@ class TestProcess:
 
         with patch.object(ep, "detect_new_regions", return_value=new_regions), \
              patch.object(ep, "assign_new_regions", return_value=lm) as mock_assign, \
-             patch.object(ep, "extend_pixel", return_value=lm), \
+             patch.object(ep, "extend_pixel", return_value=lm) as mock_ext, \
              patch("app.services.extended_partition.ContourExpander") as MockExp:
 
             mock_exp = MagicMock()
@@ -647,13 +712,14 @@ class TestProcess:
             )
 
         mock_assign.assert_called_once()
+        mock_ext.assert_called_once()
         assert len(result["data"]) > 0
 
     def test_k20pro_landmarks(
         self, ep, mock_transformer, mock_graph_builder, mock_landmark_builder
     ):
-        """K20PRO 应生成 landmark"""
-        map_img = np.full((30, 30), 200, dtype=np.uint8)
+        """K20PRO 有新区域时应生成 landmark"""
+        map_img = np.full((30, 30), 255, dtype=np.uint8)
         cnt = np.array([[[5, 5]], [[20, 5]], [[20, 20]], [[5, 20]]], dtype=np.int32)
         mock_transformer.rooms_data_to_contours.return_value = [cnt]
         mock_landmark_builder.generate_landmarks.return_value = [
@@ -661,10 +727,10 @@ class TestProcess:
         ]
 
         map_data = {
-            "map_img": map_img,
+            "cleaned_img": map_img,
+            "cleaned_img2": map_img,
             "robot_model": "S-K20PRO",
             "uuid": "k20-uuid",
-            "input_img": map_img,
             "labels_json": {
                 "data": [
                     {"name": "A", "id": "ROOM_001", "type": "polygon",
@@ -674,10 +740,14 @@ class TestProcess:
             },
         }
 
+        new_regions = np.zeros((30, 30), dtype=np.int32)
+        new_regions[25:29, 25:29] = 1  # 一个新区域
+
         lm = np.zeros((30, 30), dtype=np.int32)
         lm[5:20, 5:20] = 1
 
-        with patch.object(ep, "detect_new_regions", return_value=np.zeros((30, 30), dtype=np.int32)), \
+        with patch.object(ep, "detect_new_regions", return_value=new_regions), \
+             patch.object(ep, "assign_new_regions", return_value=lm), \
              patch.object(ep, "extend_pixel", return_value=lm), \
              patch("app.services.extended_partition.ContourExpander") as MockExp:
 

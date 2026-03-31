@@ -8,12 +8,12 @@ min_input_size: 416              # 小图先居中 pad 到此尺寸再 letterbox
 normalize: false              # YOLOv8 仅需 /255.0, 无需 ImageNet 标准化
 mean: [0.485, 0.456, 0.406]
 std: [0.229, 0.224, 0.225]
-viz_dir: "tests/output"  # 可视化结果保存目录 (相对路径，便于部署/测试)
+# viz_dir: "tests/output"  # 可视化结果保存目录 (相对路径，便于部署/测试)
 
 # ---- Triton 推理 ----
-triton_url: ""               # 留空则 fallback 到连通域方法，如 "192.168.2.55:8001"
+triton_url: "192.168.2.55:8001"               # 留空则 fallback 到连通域方法，如 "192.168.2.55:8001"
 model_name: "room_seg"
-model_version: ""
+model_version: "2"
 triton_protocol: "grpc"      # grpc 或 http
 input_name: "images"
 output_name: "output0"

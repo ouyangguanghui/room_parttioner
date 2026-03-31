@@ -19,12 +19,14 @@ OBB 与 line 的关系 (参见 dataset/line_to_obb.py):
 
 from cgitb import small
 import logging
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Set
 
 import numpy as np
 import cv2
 
-logger = logging.getLogger(__name__)
+from app.utils.labels_ops import expand_contours, expand_one
+
+logger = logging.getLogger(f"{__name__} [Postprocessor]")
 
 
 class Postprocessor:
@@ -46,6 +48,8 @@ class Postprocessor:
             raw_output: 模型原始输出 OBB 列表，每个元素为 4 个顶点 [[x,y], ...]
             map_data: 地图数据字典
                 input_img:     补墙平滑后的灰度地图 (H, W) uint8
+                cleaned_img:   去噪但未补墙的地图 (H, W) uint8
+                cleaned_img2:  补墙平滑后的地图 (H, W) uint8
                 tensor_scale:  (可选) letterbox 缩放比，用于 OBB 坐标逆映射
                 tensor_pad:    (可选) (pad_top, pad_left) letterbox 填充，用于逆映射
                 pre_pad:       (可选) (pad_top, pad_left) 小图预填充偏移
@@ -56,7 +60,7 @@ class Postprocessor:
                 "threshold_list": 延伸后的分割线端点列表 [[(x1,y1), (x2,y2)], ...],
                 "thickness_size" : 分割线粗细
         """
-        input_img = map_data["input_img"]
+        input_img = map_data["cleaned_img"]
 
         # step 1: OBB 坐标逆映射 + 画 threshold 线掩膜
         threshold_result = self._build_threshold_mask(raw_output, input_img, map_data)
@@ -71,11 +75,12 @@ class Postprocessor:
         # step 4: 碎片合并
         room_map = self._merge_fragments(normal_map, small_map)
 
-        return {
-            "room_map": room_map,
-            "threshold_list": threshold_result["threshold_list"],
-            "thickness_size": self.thickness,
-        }
+        # step 5: 转换成房间多边形列表
+        room_polygons = self._convert_to_polygons(input_img, 
+                                                  room_map,
+                                                  threshold_result["threshold_list"])
+
+        return room_polygons
 
     # ==================== Step 1: OBB → threshold 掩膜 ====================
 
@@ -382,3 +387,388 @@ class Postprocessor:
         logger.info("碎片合并: 全部 %d 个碎片处理完毕 (合并 %d 个, 极端置背景 %d 个)",
                     len(frag_ids), merged_count, fallback_count)
         return result
+
+    @staticmethod
+    def _find_best_contour(cnts: List[np.ndarray]) -> np.ndarray:
+        """
+        合并多个不连通轮廓为覆盖所有非0像素的单一轮廓。
+
+        当某个房间的掩膜存在多个不连通区域时，通过形态学闭运算
+        逐步桥接间隙，直到所有区域合为一体。若形态学则返回最大面积的轮廓。
+
+        Args:
+            cnts: cv2.findContours 返回的轮廓列表
+
+        Returns:
+            覆盖所有输入轮廓区域的单一轮廓 (N, 1, 2) int32
+        """
+        if not cnts:
+            return np.zeros((0, 1, 2), dtype=np.int32)
+        if len(cnts) == 1:
+            return cnts[0]
+
+        all_pts = np.vstack(cnts)
+        x, y, bw, bh = cv2.boundingRect(all_pts)
+
+        mask = np.zeros((y + bh + 2, x + bw + 2), dtype=np.uint8)
+        cv2.drawContours(mask, cnts, -1, 255, thickness=cv2.FILLED)
+
+        for ksize in (3, 5, 7, 11, 15, 21, 31):
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (ksize, ksize))
+            closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            merged, _ = cv2.findContours(
+                closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if len(merged) == 1:
+                return merged[0]
+
+        return max(cnts, key=cv2.contourArea)
+
+    def _extract_polygons_from_label_map(self, label_map: np.ndarray) -> Dict[int, np.ndarray]:
+        """从标签图中提取每个标签对应的外轮廓多边形。"""
+        polygons: Dict[int, np.ndarray] = {}
+        max_label = int(label_map.max())
+        for lid in range(1, max_label + 1):
+            mask = (label_map == lid).astype(np.uint8)
+            if not mask.any():
+                continue
+
+            cnts, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not cnts:
+                continue
+
+            cnt = self._find_best_contour(cnts)
+            polygons[lid] = cnt.reshape(-1, 2).astype(np.float64)
+        return polygons
+
+    @staticmethod
+    def _draw_polygons_debug(
+        input_img: np.ndarray,
+        polygons: Dict[int, np.ndarray],
+        palette: Dict[int, Tuple[int, int, int]],
+        output_path: str,
+    ) -> None:
+        """绘制房间多边形及标签文本到 debug 图像。"""
+        canvas = (cv2.cvtColor(input_img, cv2.COLOR_GRAY2BGR)
+                  if input_img.ndim == 2 else input_img.copy())
+
+        for lid, poly in polygons.items():
+            pts = np.asarray(poly, dtype=np.float64).reshape(-1, 2).astype(np.int32)
+            if pts.shape[0] == 0:
+                continue
+            color = palette.get(lid, (0, 255, 0))
+            cv2.polylines(canvas, [pts], True, color, 1)
+            cx, cy = pts.mean(axis=0).astype(int)
+            cv2.putText(canvas, str(lid), (cx, cy),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        cv2.imwrite(output_path, canvas)
+
+    @staticmethod
+    def _merge_fragments_to_polygons(
+        normal_map: np.ndarray,
+        frag_labels: np.ndarray,
+    ) -> Tuple[np.ndarray, int, int]:
+        """
+        将碎片标签并入 normal_map 对应房间。
+
+        策略：
+            1) 先判断是否与 normal_map 直接连通；
+            2) 若不连通，再渐进膨胀搜索最近正常区域；
+            3) 候选多个时，按接触像素众数选择目标房间。
+        """
+        result = normal_map.copy()
+        h, w = normal_map.shape[:2]
+        kernel = np.ones((3, 3), np.uint8)
+        max_search = int((h ** 2 + w ** 2) ** 0.5) + 1
+
+        frag_ids = [int(fid) for fid in np.unique(frag_labels) if fid > 0]
+        frag_ids.sort(key=lambda fid: -int((frag_labels == fid).sum()))
+
+        merged_count = 0
+        fallback_count = 0
+
+        for fid in frag_ids:
+            frag_mask = frag_labels == fid
+            frag_u8 = frag_mask.astype(np.uint8)
+
+            # 第一阶段：直接连通（1 像素邻接）检查
+            dilated = cv2.dilate(frag_u8, kernel, iterations=1)
+            neighbor_px = normal_map[(dilated > 0) & ~frag_mask & (normal_map > 0)]
+            if neighbor_px.size > 0:
+                best = int(np.bincount(neighbor_px).argmax())
+                result[frag_mask] = best
+                merged_count += 1
+                continue
+
+            # 第二阶段：无直接连通时，渐进搜索最近 normal_map 房间
+            search_front = frag_u8.copy()
+            best = 0
+            for _ in range(max_search):
+                search_front = cv2.dilate(search_front, kernel, iterations=1)
+                frontier = (search_front > 0) & ~frag_mask
+                neighbor_px = normal_map[frontier & (normal_map > 0)]
+                if neighbor_px.size > 0:
+                    best = int(np.bincount(neighbor_px).argmax())
+                    break
+
+            if best > 0:
+                result[frag_mask] = best
+                merged_count += 1
+            else:
+                result[frag_mask] = 0
+                fallback_count += 1
+                logger.warning("多边形碎片 %d 未找到邻居，置为背景", fid)
+
+        return result, merged_count, fallback_count
+
+    @staticmethod
+    def _edge_key(p1: Tuple[int, int], p2: Tuple[int, int]) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        """无向边标准化 key。"""
+        return (p1, p2) if p1 <= p2 else (p2, p1)
+
+    @staticmethod
+    def _trace_polygon_from_edges(edges: Set[Tuple[Tuple[int, int], Tuple[int, int]]]) -> np.ndarray:
+        """
+        从网格边集合中追踪主轮廓环（最大面积环）。
+        返回 (N,2) float64；失败时返回空数组。
+        """
+        if not edges:
+            return np.zeros((0, 2), dtype=np.float64)
+
+        adjacency: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        for a, b in edges:
+            adjacency.setdefault(a, []).append(b)
+            adjacency.setdefault(b, []).append(a)
+
+        unused = set(edges)
+        loops: List[np.ndarray] = []
+
+        while unused:
+            a, b = next(iter(unused))
+            loop = [a, b]
+            unused.remove((a, b))
+            prev, curr = a, b
+
+            while True:
+                if curr == loop[0]:
+                    break
+
+                neighbors = adjacency.get(curr, [])
+                next_pt = None
+                for cand in neighbors:
+                    ekey = Postprocessor._edge_key(curr, cand)
+                    if ekey in unused and cand != prev:
+                        next_pt = cand
+                        break
+                if next_pt is None:
+                    for cand in neighbors:
+                        ekey = Postprocessor._edge_key(curr, cand)
+                        if ekey in unused:
+                            next_pt = cand
+                            break
+                if next_pt is None:
+                    break
+
+                unused.remove(Postprocessor._edge_key(curr, next_pt))
+                loop.append(next_pt)
+                prev, curr = curr, next_pt
+
+            if len(loop) >= 4 and loop[0] == loop[-1]:
+                arr = np.asarray(loop[:-1], dtype=np.float64)
+                loops.append(arr)
+
+        if not loops:
+            return np.zeros((0, 2), dtype=np.float64)
+
+        def polygon_area(poly: np.ndarray) -> float:
+            x = poly[:, 0]
+            y = poly[:, 1]
+            return 0.5 * float(np.abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+        return max(loops, key=polygon_area)
+
+    def _extract_shared_edge_polygons_from_label_map(
+        self,
+        label_map: np.ndarray,
+    ) -> Dict[int, np.ndarray]:
+        """
+        基于统一网格边界重建多边形：
+        相邻房间会共享同一组边段，从而实现严格共边界。
+        """
+        h, w = label_map.shape[:2]
+        labels = [int(lid) for lid in np.unique(label_map) if lid > 0]
+        edges_by_label: Dict[int, Set[Tuple[Tuple[int, int], Tuple[int, int]]]] = {
+            lid: set() for lid in labels
+        }
+
+        padded = np.pad(label_map, ((1, 1), (1, 1)), mode="constant", constant_values=0)
+        for y in range(1, h + 1):
+            for x in range(1, w + 1):
+                lid = int(padded[y, x])
+                if lid <= 0:
+                    continue
+
+                # 当前像素对应角点坐标范围: [x-1, x] x [y-1, y]
+                if int(padded[y, x - 1]) != lid:
+                    p1, p2 = (x - 1, y - 1), (x - 1, y)
+                    edges_by_label[lid].add(self._edge_key(p1, p2))
+                if int(padded[y, x + 1]) != lid:
+                    p1, p2 = (x, y - 1), (x, y)
+                    edges_by_label[lid].add(self._edge_key(p1, p2))
+                if int(padded[y - 1, x]) != lid:
+                    p1, p2 = (x - 1, y - 1), (x, y - 1)
+                    edges_by_label[lid].add(self._edge_key(p1, p2))
+                if int(padded[y + 1, x]) != lid:
+                    p1, p2 = (x - 1, y), (x, y)
+                    edges_by_label[lid].add(self._edge_key(p1, p2))
+
+        polygons: Dict[int, np.ndarray] = {}
+        for lid, edges in edges_by_label.items():
+            poly = self._trace_polygon_from_edges(edges)
+            if poly.size > 0:
+                polygons[lid] = poly
+        return polygons
+
+    def _align_polygons_shared_boundary(
+        self,
+        label_map: np.ndarray,
+        polygons: Dict[int, np.ndarray],
+    ) -> Dict[int, np.ndarray]:
+        """Step5: 以统一边界网格重建，确保相邻房间严格共边界。"""
+        if not polygons:
+            return polygons
+        return self._extract_shared_edge_polygons_from_label_map(label_map)
+
+    def _convert_to_polygons(
+        self,
+        input_img: np.ndarray,
+        room_map: np.ndarray,
+        threshold_list: List[List[float]] = None,
+    ) -> List[List[List[float]]]:
+        """
+        将房间标签图转换成房间多边形列表，根据分割线列表判断该分割线位于哪两个
+        房间之间，并把分割线加入到对应的房间多边形列表中，使其共用一条分割线。
+        最后返回处理后的房间多边形列表，详细绘制处理前后房间多边形列表的图像进行 debug。
+
+        Args:
+            input_img: 原始地图 (H, W) uint8
+            room_map:  房间标签图 (H, W) int32, 0=背景, >0=房间
+            threshold_list: 分割线端点列表 [[(x1,y1), (x2,y2)], ...]
+
+        Returns:
+            按标签升序排列的房间多边形列表 [[[x, y], ...], ...]
+        """
+        _ = threshold_list
+
+        h, w = room_map.shape[:2]
+        max_label = int(room_map.max())
+
+        # ---- debug: 保存输入图 ----
+        cv2.imwrite("./dataset/debug/1_input_img.png", input_img)
+        if max_label > 0:
+            label_vis = (room_map * 255 // max_label).astype(np.uint8)
+        else:
+            label_vis = np.zeros_like(room_map, dtype=np.uint8)
+        cv2.imwrite("./dataset/debug/2_room_map.png", label_vis)
+
+        if max_label == 0:
+            logger.warning("room_map 无有效房间标签, 返回空列表")
+            return []
+
+        # ---- step 1: 提取每个房间的轮廓多边形 ----
+        logger.info(f"start extract room polygons")
+        logger.info(f"max_label: {max_label}")
+        room_polygons = self._extract_polygons_from_label_map(room_map)
+
+        # ---- debug: 绘制修改前的多边形 ----
+        palette = self._make_palette(max_label)
+        self._draw_polygons_debug(
+            input_img,
+            room_polygons,
+            palette,
+            "./dataset/debug/3_polygons_before.png",
+        )
+
+        # ---- step 2: 构建 normal_map（多边形覆盖）和碎片标签 ----
+        normal_map = np.zeros((h, w), dtype=np.int32)
+        for lid, polygon in room_polygons.items():
+            pts = polygon.astype(np.int32).reshape(-1, 1, 2)
+            cv2.drawContours(normal_map, [pts], -1, int(lid),
+                             thickness=cv2.FILLED)
+
+        fragment_mask = (input_img > 127) & (normal_map == 0)
+        if fragment_mask.any():
+            _, frag_labels = cv2.connectedComponents(
+                fragment_mask.astype(np.uint8), connectivity=8)
+            frag_labels = frag_labels.astype(np.int32)
+        else:
+            frag_labels = np.zeros((h, w), dtype=np.int32)
+
+
+        # ---- step 3: 先直接连通，后最近邻搜索，合并碎片 ----
+        result, merged_count, fallback_count = self._merge_fragments_to_polygons(
+            normal_map, frag_labels)
+
+        frag_count = int(np.unique(frag_labels).size - (1 if (frag_labels == 0).any() else 0))
+        logger.info("多边形碎片合并: %d 个碎片 (合并 %d, 置背景 %d)",
+                    frag_count, merged_count, fallback_count)
+
+        # ---- step 4: 由合并后的标签图重新提取最终多边形 ----
+        final_polygons = self._extract_polygons_from_label_map(result)
+        # ---- debug: 绘制修改后的多边形 ----
+        self._draw_polygons_debug(
+            input_img,
+            final_polygons,
+            palette,
+            "./dataset/debug/4_polygons_after.png",
+        )
+        
+        
+        # ---- step5: 相邻房间共边界对齐 ----
+        final_polygons = self._align_polygons_shared_boundary(result, final_polygons)
+
+        # ---- debug: 绘制修改后的多边形 ----
+        self._draw_polygons_debug(
+            input_img,
+            final_polygons,
+            palette,
+            "./dataset/debug/5_polygons_after.png",
+        )
+
+        # ---- step6 : 外扩房间多边形 ----
+        for lid, polygon in final_polygons.items():
+            expanded = expand_one(polygon, input_img)
+            final_polygons[lid] = np.asarray(expanded, dtype=np.float64).reshape(-1, 2)
+        
+
+        # ---- debug: 绘制修改后的多边形 ----
+        self._draw_polygons_debug(
+            input_img,
+            final_polygons,
+            palette,
+            "./dataset/debug/6_polygons_after.png",
+        )
+
+        logger.info("多边形转换完成: %d 个房间", len(final_polygons))
+        return [final_polygons[lid].tolist()
+                for lid in sorted(final_polygons.keys())]
+
+        
+
+
+    @staticmethod
+    def _make_palette(n: int) -> Dict[int, Tuple[int, int, int]]:
+        """生成 n 种 HSV 等距分布的可视化颜色"""
+        palette: Dict[int, Tuple[int, int, int]] = {}
+        for i in range(1, n + 1):
+            hue = int(180 * (i - 1) / max(n, 1))
+            bgr = cv2.cvtColor(
+                np.array([[[hue, 200, 230]]], dtype=np.uint8),
+                cv2.COLOR_HSV2BGR,
+            )
+            palette[i] = tuple(int(c) for c in bgr[0, 0])
+        return palette
+
+

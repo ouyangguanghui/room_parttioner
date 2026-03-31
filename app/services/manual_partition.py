@@ -30,7 +30,7 @@ from app.utils.geometry_ops import (
     find_split_points,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(f"{__name__} [ManualPartitioner]")
 
 
 class ManualPartitioner:

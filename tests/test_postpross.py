@@ -52,12 +52,10 @@ def test_merge_fragments_merges_into_normal_room():
     assert np.all(merged[14:16, 8:10] == 3)
 
 
-def test_process_returns_room_map_and_threshold_info():
+def test_process_returns_room_polygons():
     pp = Postprocessor({"min_room_area": 1.0, "resolution": 0.1, "max_extend": 30, "thickness": 1})
     m = _build_test_map(48, 48)
     raw_output = [[[10, 26], [38, 26], [38, 22], [10, 22]]]
-    out = pp.process(raw_output, {"input_img": m})
-    assert set(out.keys()) == {"room_map", "threshold_list", "thickness_size"}
-    assert out["room_map"].shape == m.shape
-    assert out["thickness_size"] == 1
-    assert len(out["threshold_list"]) == 1
+    out = pp.process(raw_output, {"cleaned_img": m})
+    assert isinstance(out, list)
+    assert len(out) >= 1

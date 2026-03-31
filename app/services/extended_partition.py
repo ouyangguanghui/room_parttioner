@@ -16,27 +16,27 @@ process() 入口签名与 AutoPartitioner / ManualPartitioner 保持一致:
 """
 
 import logging
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 
 import numpy as np
 import cv2
 
+from app.services.base_partitioner import BasePartitioner
 from app.utils.coordinate import CoordinateTransformer
 from app.utils.graph import RoomGraph
 from app.utils.landmark import LandmarkManager
-from app.utils.contour_expander import ContourExpander
-from app.utils.beautifier import ContourBeautifier
+from app.utils.labels_ops import ContourExpander
 from app.utils.geometry_ops import (
     split_labels_data,
     next_room_id,
     next_room_name,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(f"{__name__} [ExtendedPartitioner]")
 
 
 
-class ExtendedPartitioner:
+class ExtendedPartitioner(BasePartitioner):
     """
     扩展分区：在已有 labels 基础上检测新增自由区域并分配归属。
 
@@ -49,7 +49,7 @@ class ExtendedPartitioner:
     """
 
     def __init__(self, config: Dict[str, Any] = None):
-        self.config = config or {}
+        super().__init__(config)
         self.door_width = self.config.get("door_width", 20)
         self.grow_iterations = self.config.get("grow_iterations", 10)
         self.wall_threshold = self.config.get("wall_threshold", 128)
@@ -58,11 +58,6 @@ class ExtendedPartitioner:
         self.min_new_region_area = self.config.get("min_new_region_area", 50)  # pixels
         self.merge_area_threshold = self.config.get("merge_area_threshold", 0)  # m², 0=use min_room_area
         self.merge_ratio_threshold = self.config.get("merge_ratio_threshold", 0.6)
-
-        self.beautifier_status = False
-
-    def set_beautifier_status(self, status: bool):
-        self.beautifier_status = status
 
     # ==================== 像素级底层操作 ====================
 
@@ -115,13 +110,21 @@ class ExtendedPartitioner:
         for _ in range(self.grow_iterations):
             if not (result == 0).any():
                 break
+            # 同一轮先收集所有候选填充，再统一按最小 label 决策，避免顺序覆盖抖动。
+            claimed = np.zeros_like(result, dtype=np.int32)
             # 对每个已标记区域膨胀一步
             for lid in range(1, result.max() + 1):
                 mask = (result == lid).astype(np.uint8)
                 dilated = cv2.dilate(mask, np.ones((3, 3), np.uint8))
                 # 只填充未分配的空闲区域
                 fill = (dilated > 0) & (result == 0) & free_space
-                result[fill] = lid
+                if not fill.any():
+                    continue
+                take = fill & ((claimed == 0) | (lid < claimed))
+                claimed[take] = lid
+            if not claimed.any():
+                break
+            result[claimed > 0] = claimed[claimed > 0]
 
         return result
 
@@ -145,16 +148,18 @@ class ExtendedPartitioner:
         """从种子标签向外生长，填满 mask 区域"""
         result = seeds.copy()
         for _ in range(self.grow_iterations):
-            changed = False
+            claimed = np.zeros_like(result, dtype=np.int32)
             for lid in range(1, num_labels):
                 seed_mask = (result == lid).astype(np.uint8)
                 dilated = cv2.dilate(seed_mask, np.ones((3, 3), np.uint8))
                 fill = (dilated > 0) & (result == 0) & (mask > 0)
-                if fill.any():
-                    result[fill] = lid
-                    changed = True
-            if not changed:
+                if not fill.any():
+                    continue
+                take = fill & ((claimed == 0) | (lid < claimed))
+                claimed[take] = lid
+            if not claimed.any():
                 break
+            result[claimed > 0] = claimed[claimed > 0]
         return result
 
     # ==================== 新区域检测 ====================
@@ -174,8 +179,9 @@ class ExtendedPartitioner:
         Returns:
             new_regions_map: (H, W) int32, 每个新区域一个独立 label (从 1 开始), 0=非新区域
         """
+
         free_space = grid_map >= self.wall_threshold
-        unassigned = (label_map == 0) & free_space
+        unassigned = (label_map == 0) & free_space  
         unassigned_u8 = unassigned.astype(np.uint8)
 
         if not unassigned.any():
@@ -183,14 +189,10 @@ class ExtendedPartitioner:
 
         num_labels, regions = cv2.connectedComponents(unassigned_u8, connectivity=8)
 
-        # 过滤面积过小的碎片
         result = np.zeros_like(label_map)
         new_id = 0
         for rid in range(1, num_labels):
             region_mask = regions == rid
-            pixel_count = int(region_mask.sum())
-            if pixel_count < self.min_new_region_area:
-                continue
             new_id += 1
             result[region_mask] = new_id
 
@@ -257,7 +259,8 @@ class ExtendedPartitioner:
         return ("new", 0)
 
     def assign_new_regions(self, label_map: np.ndarray,
-                           new_regions_map: np.ndarray) -> np.ndarray:
+                           new_regions_map: np.ndarray,
+                           map_data: Dict[str, Any]) -> np.ndarray:
         """
         将检测到的新区域分配到已有房间或创建新房间
 
@@ -268,6 +271,14 @@ class ExtendedPartitioner:
         Returns:
             更新后的 label_map
         """
+        if self.inferencer and self.inferencer.is_ready():
+            tensor = self._prepare_tensor(map_data["input_img"], map_data)
+            raw_output = self.inferencer.run(tensor)
+            threshold_result = self.postprocessor._build_threshold_mask(raw_output, 
+                                                                        map_data["cleaned_img"], 
+                                                                        map_data)
+
+
         if new_regions_map.max() == 0:
             return label_map
 
@@ -346,8 +357,7 @@ class ExtendedPartitioner:
         """
         将轮廓序列化为 labels_json 的 data 列表 (ROOM 部分)
 
-        与 AutoPartitioner.serialize_contours 的关键区别：
-        保留已有房间的 name/id/colorType/groundMaterial 元数据，
+        保留已有房间的 name/id/groundMaterial 元数据，
         仅对新增房间分配新的 name/id。
 
         Args:
@@ -380,7 +390,7 @@ class ExtendedPartitioner:
             old_room_idx = old_room_mapping.get(label_id)
 
             if old_room_idx is not None:
-                # 继承旧房间元数据
+                # 继承旧房间元数据（id/name/groundMaterial 不变）
                 old_room = old_rooms_data[old_room_idx]
                 rooms_data.append({
                     "name": old_room.get("name", chr(ord("A") + new_idx % 26)),
@@ -417,74 +427,148 @@ class ExtendedPartitioner:
         """
         完整扩展分区流程 (已有 labels 场景)
 
-        Args:
-            map_data: 地图数据
-                "map_img": 地图图像 (H, W) 或 (H, W, 3)
-                "labels_json": 已有标注 (必须有值)
-                "robot_model": 机器人型号 str
-                "uuid": UUID str
-                "markers_json": 标记信息 json
-                "world_charge_pose": 充电桩世界坐标 [x, y, z]
-                "input_img": 补墙平滑后的灰度地图 (H, W) uint8
-            transformer: 坐标变换器
-            graph_builder: 邻接图构建器
-            landmark_builder: 标记点管理器
-
-        Returns:
-            Dict[str, Any]: labels_json 格式
+        两条分支：
+        - 无新增区域：最小改动，仅更新 graph/colors，保留旧数据
+        - 有新增区域：合并/新房间处理，DFS 排序，完整流程
         """
-        map_img = map_data["map_img"]
-        grid_map = map_data["input_img"]
+        map_img = map_data["cleaned_img"]
+        grid_map = map_data["cleaned_img2"]
+        input_img = map_data["input_img"]
         robot_model = map_data.get("robot_model", "s10")
         labels_json = map_data.get("labels_json", {})
 
+        # ---- 公共前置 ----
         # step1: 分离房间和标记点
-        old_rooms_data, _old_landmarks_data = split_labels_data(labels_json)
+        old_rooms_data, old_landmarks_data = split_labels_data(labels_json)
 
         # step2: 从已有 labels 恢复轮廓 → 构建旧 label_map
         old_contours = transformer.rooms_data_to_contours(old_rooms_data)
         h, w = map_img.shape[:2]
-        old_label_map = self._contours_to_label_map(old_contours, (h, w))
+        old_label_map = self._contours_to_label_map(
+            old_contours, map_img, (h, w)
+        )
 
         # step3: 检测新增自由区域
+        # 用完整轮廓 label_map（非自由空间过滤版）避免边界像素被误判为新增区域
         new_regions_map = self.detect_new_regions(old_label_map, grid_map)
         new_region_count = int(new_regions_map.max())
 
-        if new_region_count > 0:
-            logger.info(f"检测到 {new_region_count} 个新增区域")
-            # step4: 分配新区域归属
-            label_map = self.assign_new_regions(old_label_map, new_regions_map)
-        else:
-            logger.info("未检测到新增区域，仅执行扩展优化")
-            label_map = old_label_map.copy()
+        gray = self._to_gray(map_img)
 
-        # step5: 门口检测拆分 + 区域生长
+        if new_region_count == 0:
+            # ============ 分支 A：无新增区域 ============
+            return self._process_no_new_regions(
+                old_rooms_data, old_landmarks_data, old_contours,
+                gray, graph_builder, map_data,
+            )
+        else:
+            # ============ 分支 B：有新增区域 ============
+            return self._process_with_new_regions(
+                old_rooms_data, old_label_map, new_regions_map,
+                map_img, grid_map, input_img, gray, robot_model,
+                transformer, graph_builder, landmark_builder, map_data,
+            )
+
+    def _process_no_new_regions(
+        self,
+        old_rooms_data: List[Dict[str, Any]],
+        old_landmarks_data: List[Dict[str, Any]],
+        old_contours: List[np.ndarray],
+        gray: np.ndarray,
+        graph_builder: RoomGraph,
+        map_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        无新增区域：最小改动路径
+
+        仅更新 graph/colors，id/name/geometry/groundMaterial 全部保留旧值。
+        """
+        logger.info("未检测到新增区域，保持原有分区")
+
+        # 用旧轮廓在当前地图上重建邻接图
+        graph = graph_builder.build_graph(old_contours, gray)
+
+        # 保留旧颜色，仅修复冲突（相邻房间颜色相同）
+        old_colors = {
+            idx: room.get("colorType", 0) for idx, room in enumerate(old_rooms_data)
+        }
+        colors = self._fix_color_conflicts(graph, old_colors, graph_builder)
+
+        # 就地更新 graph 和 colorType，其余字段不变
+        for idx, room in enumerate(old_rooms_data):
+            room["graph"] = sorted(graph.get(idx, []))
+            room["colorType"] = colors.get(idx, room.get("colorType", 0))
+
+        # 标记点保留旧数据，不重排序
+        labels = {
+            "version": self.config.get(
+                "labels_version",
+                f"v{self.config.get('service_version', '4.0.2')}",
+            ),
+            "uuid": map_data.get("uuid", ""),
+            "data": old_rooms_data + old_landmarks_data,
+        }
+
+        logger.info(
+            f"扩展分区完成(无新增): {len(old_rooms_data)} 个房间, "
+            f"{len(old_landmarks_data)} 个标记点"
+        )
+        return labels
+
+    def _process_with_new_regions(
+        self,
+        old_rooms_data: List[Dict[str, Any]],
+        old_label_map: np.ndarray,
+        new_regions_map: np.ndarray,
+        map_img: np.ndarray,
+        grid_map: np.ndarray,
+        input_img: np.ndarray,
+        gray: np.ndarray,
+        robot_model: str,
+        transformer: CoordinateTransformer,
+        graph_builder: RoomGraph,
+        landmark_builder: LandmarkManager,
+        map_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        有新增区域：完整处理流程
+        """
+        new_region_count = int(new_regions_map.max())
+        logger.info(f"检测到 {new_region_count} 个新增区域")
+
+        # step1: 检测门槛
+        label_map = self.assign_new_regions(old_label_map, new_regions_map)
+
+        # step2: 门口拆分 + 区域生长
         label_map = self.extend_pixel(label_map, grid_map)
 
-        # step6: 重编号
+        # step3: 重编号
         label_map = self._relabel(label_map)
 
-        # step7: 建立新旧房间映射
+        # step4: 建立新旧房间映射
         old_room_mapping = self._build_old_room_mapping(
             old_label_map, label_map, old_rooms_data
         )
 
-        # step8: 提取轮廓
-        contours = self._extract_contours(label_map)
+        # step5: 构建分区轮廓
+        room_polygons = self.postprocessor._convert_to_polygons(map_img, label_map)
+        contours = [
+            np.asarray(polygon, dtype=np.int32).reshape(-1, 1, 2)
+            for polygon in room_polygons
+        ]
 
-        # step9: 轮廓外扩
+        # step6: 轮廓外扩
         expander = ContourExpander(self.config)
         contours = expander.expand(contours, map_img)
 
-        # step10: 邻接图 + 着色
-        gray = self._to_gray(map_img)
+        # step7: 邻接图 + 着色
         graph = graph_builder.build_graph(contours, gray)
         colors = graph_builder.assign_colors(graph)
 
-        # step11: DFS 排序
+        # step8: DFS 排序
         charge_pixel = self._get_charge_pixel(map_data, transformer)
         start = graph_builder.find_start_room(
-            contours, charge_pixel or (0, 0),
+            contours, charge_pixel if charge_pixel else (0, 0),
             max_area_start=(charge_pixel is None or robot_model == "S-K20PRO"),
         )
         order = graph_builder.dfs_sort(graph, start)
@@ -497,20 +581,13 @@ class ExtendedPartitioner:
 
         sorted_contours = [contours[i] for i in order]
 
-        # step12: 序列化 (保留旧元数据)
+        # step9: 序列化（保留旧房间 id/name/groundMaterial，新房间分配新值）
         rooms_data = self.serialize_contours(
             sorted_contours, graph, colors, order,
             transformer, old_rooms_data, old_room_mapping,
         )
 
-        # step13: 美化框 (s10)
-        if robot_model and "s10" in robot_model.lower():
-            self.set_beautifier_status(True)
-        if self.beautifier_status:
-            beautifier = ContourBeautifier(self.config)
-            beautifier.beautify(sorted_contours, map_img)
-
-        # step14: 标记点 (K20)
+        # step10: 标记点 (K20)
         landmarks_data: List[Dict[str, Any]] = []
         if robot_model == "S-K20PRO":
             marker_polygons = self._get_marker_polygons(map_data)
@@ -522,9 +599,12 @@ class ExtendedPartitioner:
                 marker_polygons=marker_polygons,
             )
 
-        # step15: 组装输出
+        # step11: 组装输出
         labels = {
-            "version": self.config.get("labels_version", f"v{self.config.get('service_version', '4.0.2')}"),
+            "version": self.config.get(
+                "labels_version",
+                f"v{self.config.get('service_version', '4.0.2')}",
+            ),
             "uuid": map_data.get("uuid", ""),
             "data": rooms_data + landmarks_data,
         }
@@ -536,66 +616,28 @@ class ExtendedPartitioner:
         )
         return labels
 
-    # ==================== 内部工具 ====================
-
     @staticmethod
-    def _extract_contours(label_map: np.ndarray) -> List[np.ndarray]:
-        """从 label_map 提取各房间轮廓"""
-        contours = []
-        if label_map is None or label_map.max() == 0:
-            return contours
-        for lid in range(1, label_map.max() + 1):
-            mask = (label_map == lid).astype(np.uint8)
-            if mask.sum() == 0:
-                continue
-            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-            if cnts:
-                contours.append(max(cnts, key=cv2.contourArea))
-        return contours
+    def _fix_color_conflicts(
+        graph: Dict[int, List[int]],
+        colors: Dict[int, int],
+        graph_builder: RoomGraph,
+    ) -> Dict[int, int]:
+        """
+        保留旧颜色，仅修复冲突：相邻房间颜色相同时重新分配。
+        """
+        result = dict(colors)
+        changed = True
+        while changed:
+            changed = False
+            for room_idx in sorted(result.keys()):
+                neighbors = graph.get(room_idx, [])
+                neighbor_colors = {result[nb] for nb in neighbors if nb in result}
+                if result[room_idx] in neighbor_colors:
+                    new_color = graph_builder.assign_color_for_room(
+                        room_idx, graph, result
+                    )
+                    if new_color != result[room_idx]:
+                        result[room_idx] = new_color
+                        changed = True
+        return result
 
-    @staticmethod
-    def _relabel(label_map: np.ndarray) -> np.ndarray:
-        """重编号使 label ID 从 1 开始连续"""
-        unique_ids = sorted(set(label_map.flat) - {0})
-        new_map = np.zeros_like(label_map)
-        for new_id, old_id in enumerate(unique_ids, start=1):
-            new_map[label_map == old_id] = new_id
-        return new_map
-
-    @staticmethod
-    def _contours_to_label_map(contours: List[np.ndarray],
-                               shape: Tuple[int, int]) -> np.ndarray:
-        """轮廓列表 → label_map"""
-        h, w = shape[:2]
-        label_map = np.zeros((h, w), dtype=np.int32)
-        for i, cnt in enumerate(contours):
-            cv2.drawContours(label_map, [cnt], -1, i + 1, -1)
-        return label_map
-
-    @staticmethod
-    def _to_gray(img: np.ndarray) -> np.ndarray:
-        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.copy()
-
-    @staticmethod
-    def _get_charge_pixel(
-        map_data: Dict[str, Any],
-        transformer: CoordinateTransformer,
-    ) -> Optional[Tuple[int, int]]:
-        """充电桩世界坐标 → 像素坐标"""
-        pose = map_data.get("world_charge_pose", [0, 0, 0])
-        if pose == [0, 0, 0]:
-            return None
-        return transformer.world_to_pixel(pose[0], pose[1])
-
-    @staticmethod
-    def _get_marker_polygons(map_data: Dict[str, Any]) -> Optional[List]:
-        """提取家具标记多边形"""
-        markers_json = map_data.get("markers_json")
-        if not markers_json:
-            return None
-        polys = []
-        for item in markers_json.get("data", []):
-            if item.get("name") == "家具" and item.get("type") == "polygon":
-                polys.append(item["geometry"])
-        return polys if polys else None

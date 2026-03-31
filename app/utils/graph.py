@@ -1,6 +1,4 @@
 """房间邻接图构建 + 图着色"""
-
-import random
 from typing import Dict, Any, List, Tuple, Optional
 import logging
 
@@ -28,6 +26,14 @@ class RoomGraph:
 
     # ==================== 邻接图构建 ====================
 
+    @staticmethod
+    def _as_cv_contour(cnt: np.ndarray) -> np.ndarray:
+        """将任意轮廓格式统一为 OpenCV 可用的 (N,1,2) int32。"""
+        arr = np.asarray(cnt)
+        if arr.size == 0:
+            return np.zeros((0, 1, 2), dtype=np.int32)
+        return arr.reshape(-1, 1, 2).astype(np.int32)
+
     def build_graph(self, contours: List[np.ndarray],
                     map_img: np.ndarray) -> Dict[int, List[int]]:
         """
@@ -44,7 +50,8 @@ class RoomGraph:
             {room_index: [neighbor_indices]}
         """
         h, w = map_img.shape[:2]
-        n = len(contours)
+        norm_contours = [self._as_cv_contour(cnt) for cnt in contours]
+        n = len(norm_contours)
         graph: Dict[int, List[int]] = {i: [] for i in range(n)}
         min_gap_pixels = 0.10 / (self.resolution ** 2) 
 
@@ -59,7 +66,7 @@ class RoomGraph:
 
         for i in range(n):
             for j in range(i + 1, n):
-                if self._are_adjacent(contours[i], contours[j],
+                if self._are_adjacent(norm_contours[i], norm_contours[j],
                                       wall_mask, h, w, min_gap_pixels):
                     graph[i].append(j)
                     graph[j].append(i)
@@ -71,6 +78,11 @@ class RoomGraph:
                       wall_mask: np.ndarray, h: int, w: int,
                       min_gap_pixels: float) -> bool:
         """判断两个轮廓是否相邻"""
+        cnt1 = self._as_cv_contour(cnt1)
+        cnt2 = self._as_cv_contour(cnt2)
+        if cnt1.shape[0] < 3 or cnt2.shape[0] < 3:
+            return False
+
         mask = np.zeros((h, w), dtype=np.uint8)
         cv2.drawContours(mask, [cnt1], -1, 255, -1)
         cv2.drawContours(mask, [cnt2], -1, 255, -1)
@@ -89,6 +101,7 @@ class RoomGraph:
         #     for k in range(1, num_objects)
         # )
         # return not all_small if num_objects > 2 else False
+        return False
 
     def check_connectivity(self, cnt1: np.ndarray, cnt2: np.ndarray,
                            map_img: np.ndarray) -> bool:
@@ -105,6 +118,17 @@ class RoomGraph:
         return self._are_adjacent(cnt1, cnt2, wall_mask, h, w, min_gap)
 
     # ==================== 图着色 ====================
+
+    def _deterministic_fallback_color(self, room_idx: int, neighbor_colors: List[int]) -> int:
+        """
+        当 0..NUM_COLORS 均被相邻房间占用时，使用确定性最小冲突回退。
+        """
+        counts = [neighbor_colors.count(c) for c in range(self.NUM_COLORS)]
+        min_conflict = min(counts)
+        candidates = [c for c, conflict in enumerate(counts) if conflict == min_conflict]
+        if not candidates:
+            return room_idx % self.NUM_COLORS
+        return candidates[room_idx % len(candidates)]
 
     def assign_colors(self, graph: Dict[int, List[int]] = None) -> Dict[int, int]:
         """
@@ -126,14 +150,14 @@ class RoomGraph:
                 colors[nb] for nb in g[room]
                 if colors[nb] is not None
             }
+            used_neighbor_colors = [int(colors[nb]) for nb in g[room] if colors[nb] is not None]
             # 分配最小可用颜色
             for c in range(self.NUM_COLORS):
                 if c not in neighbor_colors:
                     colors[room] = c
                     break
             else:
-                # 5 色都被占了，随机选一个
-                colors[room] = random.randint(0, self.NUM_COLORS - 1)
+                colors[room] = self._deterministic_fallback_color(room, used_neighbor_colors)
 
         return colors
 
@@ -150,7 +174,9 @@ class RoomGraph:
         for c in range(self.NUM_COLORS):
             if c not in neighbor_colors:
                 return c
-        return random.randint(0, self.NUM_COLORS - 1)
+        used_neighbor_colors = [int(current_colors[nb]) for nb in graph.get(room_idx, [])
+                                if nb in current_colors and current_colors[nb] is not None]
+        return self._deterministic_fallback_color(room_idx, used_neighbor_colors)
 
     # ==================== DFS 房间排序 ====================
 
@@ -217,6 +243,9 @@ class RoomGraph:
             max_area = 0
             start_room_idx = 0
             for i, cnt in enumerate(contours):
+                cnt = self._as_cv_contour(cnt)
+                if cnt.shape[0] < 3:
+                    continue
                 area = cv2.contourArea(cnt)
                 if area > max_area:
                     max_area = area
@@ -227,6 +256,9 @@ class RoomGraph:
 
         # 先找包含充电桩的房间
         for i, cnt in enumerate(contours):
+            cnt = self._as_cv_contour(cnt)
+            if cnt.shape[0] < 3:
+                continue
             if cv2.pointPolygonTest(cnt, pt, False) >= 0:
                 return i
 
@@ -234,6 +266,9 @@ class RoomGraph:
         min_dist = float('inf')
         closest = 0
         for i, cnt in enumerate(contours):
+            cnt = self._as_cv_contour(cnt)
+            if cnt.shape[0] < 3:
+                continue
             dist = abs(cv2.pointPolygonTest(cnt, pt, True))
             if dist < min_dist:
                 min_dist = dist

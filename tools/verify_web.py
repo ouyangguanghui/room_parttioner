@@ -112,8 +112,15 @@ def rooms_to_pixel_coords(rooms_data: List[Dict], transformer: CoordinateTransfo
         else:
             cx, cy = pixels[0] if pixels else [0, 0]
 
+        # result.append({
+        #     "id": room["id"],
+        #     "name": room.get("name", ""),
+        #     "pixels": pixels,
+        #     "centroid": [cx, cy],
+        #     "colorType": room.get("colorType"),
+        # })
         result.append({
-            "id": room["id"],
+            "id": room["id"].split("_")[-1],
             "name": room.get("name", ""),
             "pixels": pixels,
             "centroid": [cx, cy],
@@ -219,6 +226,15 @@ def _execute_operation(case_id: str, operation: str,
         cfg = dict(config)
         cfg["triton_url"] = triton_url
         svc = RoomService(cfg)
+
+    logger.info(f"room_ids: {room_ids}")
+    logger.info(f"division_dict: {division_dict}")
+    if room_ids is not None:
+        room_ids = [ f"ROOM_{rid}" for rid in room_ids ]
+    if division_dict is not None:
+        division_dict = {k: f"ROOM_{v}" if k == "id" else v for k, v in division_dict.items()}
+    logger.info(f"room_ids: {room_ids}")
+    logger.info(f"division_dict: {division_dict}")
 
     result = svc.room_edit(
         map_data,
@@ -969,7 +985,14 @@ def main():
     logger.info(f"数据目录: {DATA_ROOT}")
     logger.info(f"启动地址: http://localhost:{args.port}")
 
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+    uvicorn.run(
+        "tools.verify_web:app",
+        host="0.0.0.0",
+        port=args.port,
+        log_level="info",
+        reload=True,
+        reload_dirs=[str(ROOT)],
+    )
 
 
 if __name__ == "__main__":

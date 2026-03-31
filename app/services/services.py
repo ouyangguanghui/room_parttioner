@@ -32,7 +32,7 @@ from app.utils.coordinate import CoordinateTransformer
 from app.utils.graph import RoomGraph
 from app.utils.landmark import LandmarkManager
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(f"{__name__} [RoomService]")
 
 
 class RoomService:

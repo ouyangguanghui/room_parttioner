@@ -44,10 +44,23 @@ class CoordinateTransformer:
         wy = round((self.height - py - 1) * self.resolution + self.origin[1] - self.offset, 3)
         return wx, wy
 
+    @staticmethod
+    def _round_half_away_from_zero(value: float) -> int:
+        """稳定整型量化：0.5 始终远离 0，避免 Python round 的银行家舍入。"""
+        if value >= 0:
+            return int(math.floor(value + 0.5))
+        return int(math.ceil(value - 0.5))
+
     def world_to_pixel(self, wx: float, wy: float) -> Tuple[int, int]:
         """单个世界坐标 → 像素坐标"""
-        px = int((wx - self.origin[0]) / self.resolution)
-        py = int(self.height - (wy - self.origin[1]) / self.resolution - 1)
+        # 与 pixel_to_world 对称：减去/加回 offset，并使用稳定舍入避免 int 截断漂移。
+        px_f = (wx - self.origin[0] - self.offset) / self.resolution
+        py_f = self.height - (wy - self.origin[1] + self.offset) / self.resolution - 1
+        px = self._round_half_away_from_zero(px_f)
+        py = self._round_half_away_from_zero(py_f)
+
+        # pix_x = (geometry[i] - self.origin[0]) / self.resolution
+        # pix_y = h - (geometry[i+1] - self.origin[1]) / self.resolution - 1
         return px, py
 
     def contour_to_world(self, contour: np.ndarray) -> List[Tuple[float, float]]:

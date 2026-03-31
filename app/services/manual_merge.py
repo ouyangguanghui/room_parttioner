@@ -27,7 +27,7 @@ from app.utils.geometry_ops import (
     flatten_geometry,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(f"{__name__} [ManualMerger]")
 
 
 class ManualMerger:
