@@ -169,28 +169,30 @@ class ContourExpander:
 
 
 def expand_contours(contours: List[np.ndarray],
-                    map_img: np.ndarray) -> List[np.ndarray]:
-    return ContourExpander().expand(contours, map_img)
+                    map_img: np.ndarray,
+                    config: dict = None) -> List[np.ndarray]:
+    return ContourExpander(config).expand(contours, map_img)
 
 
-def expand_one(contour: np.ndarray, map_img: np.ndarray) -> np.ndarray:
-    return ContourExpander().contour_expand(contour, map_img)
+def expand_one(contour: np.ndarray, map_img: np.ndarray,
+               config: dict = None) -> np.ndarray:
+    return ContourExpander(config).contour_expand(contour, map_img)
 
 
 # 构造一个测试用例
-if __name__ == "__main__":
-    contour = np.array([[100, 100], [400, 100], [400, 400], [300, 400], [300, 500], [200, 500], [200, 400], [100, 100]])
-    contour1 = np.array([[400, 100], [600, 100], [600, 200], [400, 200], [400, 100]])
-    contour2 = np.array([[100, 500], [600, 500], [600, 800], [100, 800], [100, 500]])
-    map_img = np.zeros((600, 900), dtype=np.uint8)
-    cv2.drawContours(map_img, [contour], -1, 255, -1)
-    cv2.drawContours(map_img, [contour1], -1, 255, -1)
-    cv2.drawContours(map_img, [contour2], -1, 255, -1)
-    draw_img = cv2.cvtColor(map_img, cv2.COLOR_GRAY2RGB) if map_img.ndim == 2 else map_img.copy()
-    cv2.drawContours(draw_img, [contour], -1, (0, 0, 255), 1)
-    cv2.imwrite("./dataset/debug/expand/0_map.png", draw_img)
-    expander = ContourExpander()
-    expanded_contour = expander.contour_expand(contour, map_img)
-    print(expanded_contour)
-    cv2.drawContours(draw_img, [expanded_contour], -1, (0, 255, 0), 1)
-    cv2.imwrite("./dataset/debug/expand/1_map.png", draw_img)
+# if __name__ == "__main__":
+#     contour = np.array([[100, 100], [400, 100], [400, 400], [300, 400], [300, 500], [200, 500], [200, 400], [100, 100]])
+#     contour1 = np.array([[400, 100], [600, 100], [600, 200], [400, 200], [400, 100]])
+#     contour2 = np.array([[100, 500], [600, 500], [600, 800], [100, 800], [100, 500]])
+#     map_img = np.zeros((600, 900), dtype=np.uint8)
+#     cv2.drawContours(map_img, [contour], -1, 255, -1)
+#     cv2.drawContours(map_img, [contour1], -1, 255, -1)
+#     cv2.drawContours(map_img, [contour2], -1, 255, -1)
+#     draw_img = cv2.cvtColor(map_img, cv2.COLOR_GRAY2RGB) if map_img.ndim == 2 else map_img.copy()
+#     cv2.drawContours(draw_img, [contour], -1, (0, 0, 255), 1)
+#     cv2.imwrite("./dataset/debug/expand/0_map.png", draw_img)
+#     expander = ContourExpander()
+#     expanded_contour = expander.contour_expand(contour, map_img)
+#     print(expanded_contour)
+#     cv2.drawContours(draw_img, [expanded_contour], -1, (0, 255, 0), 1)
+#     cv2.imwrite("./dataset/debug/expand/1_map.png", draw_img)

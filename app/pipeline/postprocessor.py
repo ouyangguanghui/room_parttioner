@@ -17,14 +17,13 @@ OBB 与 line 的关系 (参见 dataset/line_to_obb.py):
         长边 (v0→v1, v2→v3) 方向 = p2-p1   ← 原始线段方向
 """
 
-from cgitb import small
 import logging
 from typing import Dict, Any, Tuple, List, Set
 
 import numpy as np
 import cv2
 
-from app.utils.labels_ops import expand_contours, expand_one
+from app.utils.labels_ops import expand_one
 
 logger = logging.getLogger(f"{__name__} [Postprocessor]")
 
@@ -666,12 +665,12 @@ class Postprocessor:
         max_label = int(room_map.max())
 
         # ---- debug: 保存输入图 ----
-        cv2.imwrite("./dataset/debug/1_input_img.png", input_img)
-        if max_label > 0:
-            label_vis = (room_map * 255 // max_label).astype(np.uint8)
-        else:
-            label_vis = np.zeros_like(room_map, dtype=np.uint8)
-        cv2.imwrite("./dataset/debug/2_room_map.png", label_vis)
+        # cv2.imwrite("./dataset/debug/1_input_img.png", input_img)
+        # if max_label > 0:
+        #     label_vis = (room_map * 255 // max_label).astype(np.uint8)
+        # else:
+        #     label_vis = np.zeros_like(room_map, dtype=np.uint8)
+        # cv2.imwrite("./dataset/debug/2_room_map.png", label_vis)
 
         if max_label == 0:
             logger.warning("room_map 无有效房间标签, 返回空列表")
@@ -683,13 +682,13 @@ class Postprocessor:
         room_polygons = self._extract_polygons_from_label_map(room_map)
 
         # ---- debug: 绘制修改前的多边形 ----
-        palette = self._make_palette(max_label)
-        self._draw_polygons_debug(
-            input_img,
-            room_polygons,
-            palette,
-            "./dataset/debug/3_polygons_before.png",
-        )
+        # palette = self._make_palette(max_label)
+        # self._draw_polygons_debug(
+        #     input_img,
+        #     room_polygons,
+        #     palette,
+        #     "./dataset/debug/3_polygons_before.png",
+        # )
 
         # ---- step 2: 构建 normal_map（多边形覆盖）和碎片标签 ----
         normal_map = np.zeros((h, w), dtype=np.int32)
@@ -718,24 +717,24 @@ class Postprocessor:
         # ---- step 4: 由合并后的标签图重新提取最终多边形 ----
         final_polygons = self._extract_polygons_from_label_map(result)
         # ---- debug: 绘制修改后的多边形 ----
-        self._draw_polygons_debug(
-            input_img,
-            final_polygons,
-            palette,
-            "./dataset/debug/4_polygons_after.png",
-        )
+        # self._draw_polygons_debug(
+        #     input_img,
+        #     final_polygons,
+        #     palette,
+        #     "./dataset/debug/4_polygons_after.png",
+        # )
         
         
         # ---- step5: 相邻房间共边界对齐 ----
         final_polygons = self._align_polygons_shared_boundary(result, final_polygons)
 
         # ---- debug: 绘制修改后的多边形 ----
-        self._draw_polygons_debug(
-            input_img,
-            final_polygons,
-            palette,
-            "./dataset/debug/5_polygons_after.png",
-        )
+        # self._draw_polygons_debug(
+        #     input_img,
+        #     final_polygons,
+        #     palette,
+        #     "./dataset/debug/5_polygons_after.png",
+        # )
 
         # ---- step6 : 外扩房间多边形 ----
         for lid, polygon in final_polygons.items():
@@ -744,12 +743,12 @@ class Postprocessor:
         
 
         # ---- debug: 绘制修改后的多边形 ----
-        self._draw_polygons_debug(
-            input_img,
-            final_polygons,
-            palette,
-            "./dataset/debug/6_polygons_after.png",
-        )
+        # self._draw_polygons_debug(
+        #     input_img,
+        #     final_polygons,
+        #     palette,
+        #     "./dataset/debug/6_polygons_after.png",
+        # )
 
         logger.info("多边形转换完成: %d 个房间", len(final_polygons))
         return [final_polygons[lid].tolist()

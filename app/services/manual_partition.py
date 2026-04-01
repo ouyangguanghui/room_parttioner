@@ -6,8 +6,9 @@
 """
 
 import logging
+import json
+import time
 from typing import Dict, Any, List, Tuple
-from cv2 import log
 from shapely.geometry import Polygon
 
 import numpy as np
@@ -160,10 +161,11 @@ class ManualPartitioner:
         graph = graph_builder.build_graph(contours_list, map_img)
         
         logger.info(f">>>> graph: {graph}")
+        # logger.info(f">>>> rooms_data: {rooms_data}")
         for room_idx in range(len(rooms_data)):
             # 打印一下graph是否有变化
-            old_graph_id = [rooms_data[i]['id'] for i in (rooms_data[room_idx].get('graph') or []) if i is not None]
-            new_graph_id = [rooms_data[i]['id'] for i in (graph[room_idx] or []) if i is not None]
+            old_graph_id = [rooms_data[i]['id'] for i in (rooms_data[room_idx].get('graph') or []) if i is not None and i < len(rooms_data)]
+            new_graph_id = [rooms_data[i]['id'] for i in (graph[room_idx] or []) if i is not None and i < len(rooms_data)]
             logger.info(f">>>> room_id : {rooms_data[room_idx]['id']}： {old_graph_id} ---> {new_graph_id}")
             rooms_data[room_idx]["graph"] = graph[room_idx]
         

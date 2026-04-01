@@ -14,9 +14,9 @@ _DEFAULT_CONFIG = {
     "service_version": "4.0.2",
     "model_version_tag": "0.0.1",
     # 前处理
-    "target_size": [512, 512],
+    "target_size": [1280, 1280],
     "min_input_size": 416,
-    "normalize": True,
+    "normalize": False,
     "mean": [0.485, 0.456, 0.406],
     "std": [0.229, 0.224, 0.225],
     # 推理
@@ -24,8 +24,11 @@ _DEFAULT_CONFIG = {
     "model_name": "room_seg",
     "model_version": "",
     "triton_protocol": "grpc",
-    "input_name": "input",
-    "output_name": "output",
+    "input_name": "images",
+    "output_name": "output0",
+    "output_format": "yolo_obb",
+    "conf_threshold": 0.1,
+    "nms_threshold": 0.35,
     # 后处理
     "morph_kernel_size": 5,
     # 通用
@@ -35,6 +38,9 @@ _DEFAULT_CONFIG = {
     # 扩展分区
     "door_width": 20,
     "grow_iterations": 10,
+    "merge_area_threshold": 0,
+    "merge_ratio_threshold": 0.6,
+    "min_new_region_area": 50,
     # 手动划分
     "line_thickness": 3,
 }

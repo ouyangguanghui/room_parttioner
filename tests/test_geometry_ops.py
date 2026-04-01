@@ -1,7 +1,7 @@
 """geometry_ops 纯函数单测。"""
 
 from app.utils.geometry_ops import (
-    find_room_index_by_id,
+    get_room_index_by_id,
     next_room_id,
     next_room_name,
     flatten_geometry,
@@ -14,8 +14,8 @@ def test_room_helpers():
         {"id": "ROOM_001", "name": "A"},
         {"id": "ROOM_007", "name": "C"},
     ]
-    assert find_room_index_by_id(rooms, "ROOM_007") == 1
-    assert find_room_index_by_id(rooms, "ROOM_999") == -1
+    assert get_room_index_by_id(rooms, "ROOM_007") == 1
+    assert get_room_index_by_id(rooms, "ROOM_999") == -1
     assert next_room_id(rooms) == "ROOM_008"
     assert next_room_name(rooms) == "B"
 

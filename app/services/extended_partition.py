@@ -60,89 +60,6 @@ class ExtendedPartitioner(BasePartitioner):
         self.merge_ratio_threshold = self.config.get("merge_ratio_threshold", 0.6)
 
     # ==================== 像素级底层操作 ====================
-
-    def split_by_doorway(self, label_map: np.ndarray, _grid_map: np.ndarray) -> np.ndarray:
-        """
-        通过门口检测拆分大区域
-
-        在墙壁上寻找窄通道（门口），切断后重新标记连通域
-        """
-        result = label_map.copy()
-        next_label = label_map.max() + 1
-
-        for lid in range(1, label_map.max() + 1):
-            mask = (label_map == lid).astype(np.uint8)
-            if mask.sum() == 0:
-                continue
-
-            # 腐蚀找窄通道
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                               (self.door_width, self.door_width))
-            eroded = cv2.erode(mask, kernel)
-
-            # 检查腐蚀后是否分裂成多个连通域
-            num_labels, sub_labels = cv2.connectedComponents(eroded)
-            if num_labels <= 2:  # 1(背景) + 1(区域) = 没有分裂
-                continue
-
-            # 用区域生长把原始像素分配给最近的子区域
-            grown = self._region_grow(mask, sub_labels, num_labels)
-            for sub_id in range(2, num_labels):
-                sub_mask = grown == sub_id
-                result[sub_mask] = next_label
-                next_label += 1
-
-        return result
-
-    def grow_unassigned(self, label_map: np.ndarray, grid_map: np.ndarray) -> np.ndarray:
-        """
-        区域生长：将未分配的空闲像素分配给最近的房间
-
-        适用于自动分区后边界附近的未标记像素
-        """
-        free_space = grid_map >= self.wall_threshold
-        unassigned = (label_map == 0) & free_space
-
-        if not unassigned.any():
-            return label_map
-
-        result = label_map.copy()
-        for _ in range(self.grow_iterations):
-            if not (result == 0).any():
-                break
-            # 同一轮先收集所有候选填充，再统一按最小 label 决策，避免顺序覆盖抖动。
-            claimed = np.zeros_like(result, dtype=np.int32)
-            # 对每个已标记区域膨胀一步
-            for lid in range(1, result.max() + 1):
-                mask = (result == lid).astype(np.uint8)
-                dilated = cv2.dilate(mask, np.ones((3, 3), np.uint8))
-                # 只填充未分配的空闲区域
-                fill = (dilated > 0) & (result == 0) & free_space
-                if not fill.any():
-                    continue
-                take = fill & ((claimed == 0) | (lid < claimed))
-                claimed[take] = lid
-            if not claimed.any():
-                break
-            result[claimed > 0] = claimed[claimed > 0]
-
-        return result
-
-    def extend_pixel(self, label_map: np.ndarray, grid_map: np.ndarray) -> np.ndarray:
-        """
-        像素级完整扩展分区流程
-
-        1. 门口检测拆分
-        2. 未分配区域生长
-        """
-        result = self.split_by_doorway(label_map, grid_map)
-        result = self.grow_unassigned(result, grid_map)
-        return result
-
-    def extend(self, label_map: np.ndarray, grid_map: np.ndarray) -> np.ndarray:
-        """兼容旧接口：等价于 extend_pixel。"""
-        return self.extend_pixel(label_map, grid_map)
-
     def _region_grow(self, mask: np.ndarray, seeds: np.ndarray,
                      num_labels: int) -> np.ndarray:
         """从种子标签向外生长，填满 mask 区域"""
@@ -258,48 +175,323 @@ class ExtendedPartitioner(BasePartitioner):
         # 否则 → 新房间
         return ("new", 0)
 
-    def assign_new_regions(self, label_map: np.ndarray,
-                           new_regions_map: np.ndarray,
-                           map_data: Dict[str, Any]) -> np.ndarray:
+    # ==================== threshold 线分界 ====================
+
+    def _filter_thresholds(
+        self,
+        threshold_list: List,
+        old_label_map: np.ndarray,
+        gray_map: np.ndarray,
+        threshold_thickness: int = 10,
+    ) -> np.ndarray:
         """
-        将检测到的新区域分配到已有房间或创建新房间
+        过滤 threshold 线：只保留至少一个端点不在旧房间内的线。
+
+        两端都在旧房间内的线会切割旧房间，应跳过。
 
         Args:
-            label_map: 已有房间标签 (H, W) int32
-            new_regions_map: detect_new_regions 返回的新区域图
+            threshold_list: [[(x1,y1), (x2,y2)], ...]
+            old_label_map: 旧房间标签图 (H, W) int32
 
         Returns:
-            更新后的 label_map
+            filtered_mask: (H, W) uint8, 255=threshold 线像素
         """
-        if self.inferencer and self.inferencer.is_ready():
-            tensor = self._prepare_tensor(map_data["input_img"], map_data)
-            raw_output = self.inferencer.run(tensor)
-            threshold_result = self.postprocessor._build_threshold_mask(raw_output, 
-                                                                        map_data["cleaned_img"], 
-                                                                        map_data)
+        h, w = old_label_map.shape[:2]
+        mask = np.zeros((h, w), dtype=np.uint8)
 
+        for p1, p2 in threshold_list:
+            x1 = int(np.clip(round(p1[0]), 0, w - 1))
+            y1 = int(np.clip(round(p1[1]), 0, h - 1))
+            x2 = int(np.clip(round(p2[0]), 0, w - 1))
+            y2 = int(np.clip(round(p2[1]), 0, h - 1))
 
-        if new_regions_map.max() == 0:
-            return label_map
-
-        result = label_map.copy()
-        next_label = int(label_map.max()) + 1
-
-        for rid in range(1, new_regions_map.max() + 1):
-            region_mask = new_regions_map == rid
-            if not region_mask.any():
+            # 先沿线段方向两端各延伸 2px，再以该中心线绘制线段矩形（非齐次矩形）
+            dx, dy = x2 - x1, y2 - y1
+            length = np.hypot(dx, dy)
+            if length == 0:
+                # 退化为点
                 continue
 
-            action, target = self.classify_region(region_mask, result)
+            dir_x = dx / length
+            dir_y = dy / length
+            ext_x1 = x1 - dir_x * 2
+            ext_y1 = y1 - dir_y * 2
+            ext_x2 = x2 + dir_x * 2
+            ext_y2 = y2 + dir_y * 2
 
-            if action == "merge" and target > 0:
-                result[region_mask] = target
+            wx, wy = -dy / length, dx / length  # 单位法向（左侧为正）
+            # 矩形4点
+            p1a = (int(round(ext_x1 + wx * threshold_thickness / 2)), int(round(ext_y1 + wy * threshold_thickness / 2)))
+            p1b = (int(round(ext_x1 - wx * threshold_thickness / 2)), int(round(ext_y1 - wy * threshold_thickness / 2)))
+            p2a = (int(round(ext_x2 + wx * threshold_thickness / 2)), int(round(ext_y2 + wy * threshold_thickness / 2)))
+            p2b = (int(round(ext_x2 - wx * threshold_thickness / 2)), int(round(ext_y2 - wy * threshold_thickness / 2)))
+            poly = np.array([p1a, p2a, p2b, p1b], dtype=np.int32)
+            cv2.fillPoly(mask, [poly], 255)
+    
+        filtered_mask = np.zeros((h, w), dtype=np.uint8)
+        filtered_mask[(mask == 255) & (old_label_map == 0)] = 255
+        filtered_mask[(filtered_mask == 255) & (gray_map != 255)] = 0
+
+        return filtered_mask
+
+    def _classify_new_regions(
+        self,
+        old_label_map: np.ndarray,
+        old_contours: List[np.ndarray],
+        grid_map: np.ndarray,
+        filtered_mask: np.ndarray,
+    ) -> Tuple[List[np.ndarray], List[int]]:
+        """
+        用 threshold 线切割新区域，决定合并或新房间。
+        """
+        # 1. 找出所有新区域（connected components）
+        free_space = grid_map >= self.wall_threshold
+        # 新区域 = 自由空间 & 不在旧房间 & 不在 threshold 线上
+        split_mask = free_space & (old_label_map == 0)
+        split_mask[filtered_mask == 255] = 0
+
+        # 2. 找出所有新区域的外轮廓
+        new_contours, _ = cv2.findContours(split_mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+        if len(new_contours) == 0:
+            return old_contours, []
+
+        # 2. 连通域分块，逐个新区域做归属判定
+        result = old_contours.copy()
+        room_id_list = []
+        h, w = grid_map.shape[:2]
+        new_region_mask = np.zeros((h, w), dtype=np.uint8)
+        old_region_mask = np.zeros((h, w), dtype=np.uint8)
+        new_id_dict = {}
+        kernel = np.ones((3, 3), np.uint8)
+        add_new_room_idx = set()
+        merged_to_old_new_idx = set()
+        for new_idx, new_contour in enumerate(new_contours):
+            merge_old_idx_dict = {}
+            # 只和旧房间索引范围做归属判断，但轮廓使用 result 中的最新形状
+            for old_idx in range(len(old_contours)):
+                old_contour = result[old_idx]
+                old_region_mask.fill(0)
+                new_region_mask.fill(0)
+                cv2.drawContours(new_region_mask, [old_contour], -1, 255, -1)
+                new_region_mask[~free_space] = 0
+                cv2.drawContours(new_region_mask, [new_contour], -1, 255, -1)
+                merge_cnts, _ = cv2.findContours(new_region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                if len(merge_cnts) == 1:
+                    cv2.drawContours(new_region_mask, [old_contour], -1, 255, -1)
+                    merge_cnts, _ = cv2.findContours(new_region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                    new_region_mask.fill(0)
+                    old_region_mask.fill(0)
+                    cv2.drawContours(new_region_mask, [new_contour], -1, 255, -1)
+                    cv2.drawContours(old_region_mask, [old_contour], -1, 255, -1)
+                    dilated_new = cv2.dilate(new_region_mask, kernel)
+                    overlap = (dilated_new > 0) & (old_region_mask > 0)
+                    contact_count = int(overlap.sum())
+                    merge_old_idx_dict[old_idx] = (contact_count, merge_cnts[0])
+
+            # 判断是否符合新房间条件
+            if merge_old_idx_dict:
+               # 取出contact_count最大的old_idx
+               best_old_idx = max(merge_old_idx_dict.items(), key=lambda item: item[1][0])[0]
+               result[best_old_idx] = merge_old_idx_dict[best_old_idx][1]
+               if best_old_idx not in room_id_list:
+                   room_id_list.append(best_old_idx)
+               merged_to_old_new_idx.add(new_idx)
+               logger.info(f"新区域 {new_idx} 合并到旧房间 {best_old_idx}")
             else:
-                result[region_mask] = next_label
-                next_label += 1
+                # 符合新房间条件， 现在像素坐标cv2.contourArea需要resolution转换为面积
+                if cv2.contourArea(new_contour) * self.resolution ** 2 > self.min_room_area: 
+                    result.append(new_contour)
+                    new_id_dict[new_idx] = len(result) - 1 
+                    if (len(result) - 1) not in room_id_list:
+                        room_id_list.append(len(result) - 1)
+                    add_new_room_idx.add(new_idx)
+                    logger.info(f"新区域 {new_idx} 创建新房间")
+                else:
+                    logger.info(f"新区域 {new_idx} 面积太小，{cv2.contourArea(new_contour) * self.resolution ** 2} < {self.min_room_area}，不创建新房间")
 
-        return result
+        
+        # 把门槛像素合并到新房间
+        threshold_contours, _ = cv2.findContours(filtered_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        add_threshold_idx = set()
+        for new_idx, idx in new_id_dict.items():
+            if new_idx not in add_new_room_idx:
+                continue
+            new_contour = result[idx]
+            merge_threshold_dict = {}
+            for threshold_idx, threshold_contour in enumerate(threshold_contours):
+                new_region_mask.fill(0)
+                cv2.drawContours(new_region_mask, [new_contour], -1, 255, -1)
+                cv2.drawContours(new_region_mask, [threshold_contour], -1, 255, -1)
+                merge_cnts, _ = cv2.findContours(new_region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+                if len(merge_cnts) == 1:
+                    merge_threshold_dict[threshold_idx] = merge_cnts[0]
+                    new_region_mask.fill(0)
+                    old_region_mask.fill(0)
+                    cv2.drawContours(new_region_mask, [new_contour], -1, 255, -1)
+                    cv2.drawContours(old_region_mask, [threshold_contour], -1, 255, -1)
+                    dilated_new = cv2.dilate(new_region_mask, kernel)
+                    overlap = (dilated_new > 0) & (old_region_mask > 0)
+                    contact_count = int(overlap.sum())
+                    merge_threshold_dict[threshold_idx] = [contact_count, merge_cnts[0]]
+            
+            if merge_threshold_dict:
+                best_threshold_idx = max(merge_threshold_dict.items(), key=lambda item: item[1][0])[0]
+                result[idx] = merge_threshold_dict[best_threshold_idx][1]
+                add_threshold_idx.add(best_threshold_idx)
+        
+        # 收集仍未分配的区域：未并入旧房间/未创建新房间的新区域 + 未被并入新房间的 threshold 区域
+        new_region_mask.fill(0)
+        for new_idx, new_contour in enumerate(new_contours):
+            if new_idx in merged_to_old_new_idx or new_idx in add_new_room_idx:
+                continue
+            cv2.drawContours(new_region_mask, [new_contour], -1, 255, -1)
 
+        for threshold_idx, threshold_contour in enumerate(threshold_contours):
+            if threshold_idx in add_threshold_idx:
+                continue
+            cv2.drawContours(new_region_mask, [threshold_contour], -1, 255, -1)
+
+        small_contours, _ = cv2.findContours(new_region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        logger.info(f"samll contours 数量: {len(small_contours)}")
+
+        def _nearest_distance_with_points(
+            contour_a: np.ndarray, contour_b: np.ndarray
+        ) -> Tuple[float, np.ndarray, np.ndarray]:
+            pts_a = contour_a.reshape(-1, 2).astype(np.float32)
+            pts_b = contour_b.reshape(-1, 2).astype(np.float32)
+            if len(pts_a) == 0 or len(pts_b) == 0:
+                # 异常兜底：返回极大距离，点取原轮廓首点
+                pa = contour_a.reshape(-1, 2)[0]
+                pb = contour_b.reshape(-1, 2)[0]
+                return float("inf"), pa, pb
+
+            diff = pts_a[:, None, :] - pts_b[None, :, :]
+            dist2 = np.sum(diff * diff, axis=2)
+            flat_min_idx = int(np.argmin(dist2))
+            idx_a, idx_b = np.unravel_index(flat_min_idx, dist2.shape)
+            pa = pts_a[idx_a].astype(np.int32)
+            pb = pts_b[idx_b].astype(np.int32)
+            return float(np.sqrt(dist2[idx_a, idx_b])), pa, pb
+
+        for small_idx, small_contour in enumerate(small_contours):
+            small_area = cv2.contourArea(small_contour) * self.resolution ** 2
+            if small_area > self.min_room_area:
+                result.append(small_contour)
+                if (len(result) - 1) not in room_id_list:
+                    room_id_list.append(len(result) - 1)
+                logger.info(f"samll contours 面积: {small_area}")
+                logger.info(f"samll contours 新区域 {small_idx} 创建新房间")
+            else:
+                if not result:
+                    result.append(small_contour)
+                    logger.info(f"新区域 {small_idx} 太小但无可合并区域，创建兜底新房间")
+                    continue
+
+                # 优先合并到连通区域：若多个连通，取相邻区域中面积最大的
+                connected_candidates = []
+                new_region_mask.fill(0)
+                cv2.drawContours(new_region_mask, [small_contour], -1, 255, -1)
+                dilated_small = cv2.dilate(new_region_mask, kernel)
+                for candidate_idx, candidate_contour in enumerate(result):
+                    old_region_mask.fill(0)
+                    cv2.drawContours(old_region_mask, [candidate_contour], -1, 255, -1)
+                    if ((dilated_small > 0) & (old_region_mask > 0)).any():
+                        connected_candidates.append(
+                            (candidate_idx, cv2.contourArea(candidate_contour))
+                        )
+
+                if connected_candidates:
+                    target_idx = max(connected_candidates, key=lambda item: item[1])[0]
+                    logger.info(f"新区域 {small_idx} 面积太小，合并到相邻最大区域 {target_idx}")
+                    bridge_p1 = bridge_p2 = None
+                else:
+                    # 若没有连通区域，合并到最近区域
+                    best_distance = float("inf")
+                    target_idx = 0
+                    bridge_p1 = bridge_p2 = None
+                    for candidate_idx, candidate_contour in enumerate(result):
+                        distance, p1, p2 = _nearest_distance_with_points(
+                            small_contour, candidate_contour
+                        )
+                        if distance < best_distance:
+                            best_distance = distance
+                            target_idx = candidate_idx
+                            bridge_p1 = p1
+                            bridge_p2 = p2
+                    logger.info(
+                        f"新区域 {small_idx} 面积太小且无连通区域，合并到最近区域 {target_idx}, distance={best_distance:.2f}"
+                    )
+
+                new_region_mask.fill(0)
+                cv2.drawContours(new_region_mask, [result[target_idx]], -1, 255, -1)
+                cv2.drawContours(new_region_mask, [small_contour], -1, 255, -1)
+                if bridge_p1 is not None and bridge_p2 is not None:
+                    # 非连通场景补一条连接线，确保并集是单连通区域
+                    cv2.line(
+                        new_region_mask,
+                        (int(bridge_p1[0]), int(bridge_p1[1])),
+                        (int(bridge_p2[0]), int(bridge_p2[1])),
+                        255,
+                        1,
+                    )
+
+                merged_cnts, _ = cv2.findContours(
+                    new_region_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+                )
+                if merged_cnts:
+                    result[target_idx] = max(merged_cnts, key=cv2.contourArea)
+                    if target_idx not in room_id_list:
+                        room_id_list.append(target_idx)
+                else:
+                    logger.warning(f"新区域 {small_idx} 合并失败，保留原区域不变")
+
+        # debug
+        # draw_img = cv2.cvtColor(grid_map, cv2.COLOR_GRAY2BGR) if grid_map.ndim == 2 else grid_map.copy()
+        # for idx, contour in enumerate(result):
+        #     # 使用确定性颜色，避免循环内随机与重复 import
+        #     color = ((37 * idx) % 256, (97 * idx) % 256, (157 * idx) % 256)
+        #     cv2.drawContours(draw_img, [contour], -1, color, -1)
+        # cv2.imwrite("./dataset/debug/5_gray.png", draw_img)
+
+        return result, room_id_list
+
+    def _get_shared_edge_polygons(
+        self,
+        contours: List[np.ndarray],
+        shape: Tuple[int, int],
+        targte_idx : int
+    ) -> List[np.ndarray]:
+        """
+        仅对新房间执行“共享边界”重建，旧房间轮廓保持不变。
+
+        做法：
+        1) 先把当前 contours rasterize 成 label_map；
+        2) 复用 postprocessor 的统一网格边界重建；
+        3) 只替换 new room（不在 old_room_mapping 的 label）。
+        """
+        if not contours:
+            return contours
+
+        label_map = self._contours_to_label_map(contours, np.zeros(shape, dtype=np.uint8), shape)
+        shared_polygons = self.postprocessor._extract_shared_edge_polygons_from_label_map(
+            label_map
+        )
+
+        if not shared_polygons:
+            return contours
+
+        merged = contours.copy()
+        for idx in range(len(contours)):
+            if idx <= targte_idx:
+                continue
+            label_id = idx + 1
+            poly = shared_polygons.get(label_id)
+            if poly is None or poly.size == 0:
+                continue
+            merged[idx] = poly.reshape(-1, 1, 2).astype(np.int32)
+        return merged
+            
     # ==================== 序列化 (保留已有元数据) ====================
 
     def _build_old_room_mapping(
@@ -352,13 +544,15 @@ class ExtendedPartitioner(BasePartitioner):
         order: List[int],
         transformer: CoordinateTransformer,
         old_rooms_data: List[Dict[str, Any]],
-        old_room_mapping: Dict[int, int],
+        charge_room_id_list: List[str],
     ) -> List[Dict[str, Any]]:
         """
         将轮廓序列化为 labels_json 的 data 列表 (ROOM 部分)
 
-        保留已有房间的 name/id/groundMaterial 元数据，
-        仅对新增房间分配新的 name/id。
+        三类房间：
+        - 未变化旧房间：id/name/geometry/colorType/groundMaterial 全用旧值，仅更新 graph
+        - 合并过旧房间：保留 id/name/groundMaterial，更新 geometry/graph/colorType
+        - 新房间：分配新 id/name，全新 geometry/graph/colorType
 
         Args:
             contours: 排序后的轮廓列表
@@ -367,52 +561,45 @@ class ExtendedPartitioner(BasePartitioner):
             order: 排序映射 (new_idx → old_idx_in_contours)
             transformer: 坐标变换器
             old_rooms_data: 旧的 rooms_data 列表
-            old_room_mapping: {label_id → old_room_index}，label_id 是 relabel 后的 1-based
-
-        Returns:
-            rooms_data 列表
+            old_room_mapping: {label_id → old_room_index}
+            merged_old_labels: 发生过合并的旧 label 集合 (None=全部视为合并过)
         """
         rooms_data: List[Dict[str, Any]] = []
         old_to_new = {old: new for new, old in enumerate(order)}
-
-        for new_idx, cnt in enumerate(contours):
-            old_idx = order[new_idx]
-            geometry = transformer.contour_to_geometry(cnt, clockwise=True)
-
-            # 重映射 graph 邻居索引
-            old_neighbors = graph.get(old_idx, [])
-            new_neighbors = sorted(
-                old_to_new[nb] for nb in old_neighbors if nb in old_to_new
-            )
-
-            # label_id = old_idx + 1 (因为 contours 是按 relabel 后的顺序提取的)
-            label_id = old_idx + 1
-            old_room_idx = old_room_mapping.get(label_id)
-
-            if old_room_idx is not None:
-                # 继承旧房间元数据（id/name/groundMaterial 不变）
-                old_room = old_rooms_data[old_room_idx]
+        logger.info(f"order: {order}")
+        logger.info(f"graph: {graph}")
+        logger.info(f"colors: {colors}")
+        logger.info(f"old_to_new: {old_to_new}")
+        logger.info(f"old number: {len(old_rooms_data)}")
+        logger.info(f"contours number: {len(contours)}")
+        
+        for old_idx, new_idx in old_to_new.items():
+            if old_idx < len(old_rooms_data):
+                if old_idx in charge_room_id_list:
+                    geometry = transformer.contour_to_geometry(contours[new_idx])
+                    old_rooms_data[old_idx]["geometry"] = geometry
                 rooms_data.append({
-                    "name": old_room.get("name", chr(ord("A") + new_idx % 26)),
-                    "id": old_room.get("id", f"ROOM_{new_idx + 1:03d}"),
-                    "type": old_room.get("type", "polygon"),
-                    "geometry": geometry,
-                    "colorType": colors.get(old_idx, old_room.get("colorType", 0)),
-                    "graph": new_neighbors,
-                    "groundMaterial": old_room.get("groundMaterial"),
+                    "name": old_rooms_data[old_idx]["name"],
+                    "id": old_rooms_data[old_idx]["id"],
+                    "type": "polygon",
+                    "geometry": old_rooms_data[old_idx]["geometry"],
+                    "colorType": colors.get(old_idx, 0),
+                    "graph": graph.get(old_idx, []),
+                    "groundMaterial": None,
                 })
             else:
-                # 新房间：分配新 name/id
+                geometry = transformer.contour_to_geometry(contours[new_idx])
                 rooms_data.append({
-                    "name": next_room_name(rooms_data + old_rooms_data),
-                    "id": next_room_id(rooms_data + old_rooms_data),
+                    "name": next_room_name(rooms_data),
+                    "id": next_room_id(rooms_data),
                     "type": "polygon",
                     "geometry": geometry,
                     "colorType": colors.get(old_idx, 0),
-                    "graph": new_neighbors,
+                    "graph": graph.get(old_idx, []),
                     "groundMaterial": None,
                 })
-
+        
+            # logger.info(f"rooms_data: {rooms_data}")
         return rooms_data
 
     # ==================== 完整流程入口 ====================
@@ -433,7 +620,6 @@ class ExtendedPartitioner(BasePartitioner):
         """
         map_img = map_data["cleaned_img"]
         grid_map = map_data["cleaned_img2"]
-        input_img = map_data["input_img"]
         robot_model = map_data.get("robot_model", "s10")
         labels_json = map_data.get("labels_json", {})
 
@@ -464,8 +650,8 @@ class ExtendedPartitioner(BasePartitioner):
         else:
             # ============ 分支 B：有新增区域 ============
             return self._process_with_new_regions(
-                old_rooms_data, old_label_map, new_regions_map,
-                map_img, grid_map, input_img, gray, robot_model,
+                old_rooms_data, old_contours,old_label_map, new_regions_map,
+                map_img, grid_map, gray, robot_model,
                 transformer, graph_builder, landmark_builder, map_data,
             )
 
@@ -518,11 +704,11 @@ class ExtendedPartitioner(BasePartitioner):
     def _process_with_new_regions(
         self,
         old_rooms_data: List[Dict[str, Any]],
+        old_contours: List[np.ndarray],
         old_label_map: np.ndarray,
         new_regions_map: np.ndarray,
         map_img: np.ndarray,
         grid_map: np.ndarray,
-        input_img: np.ndarray,
         gray: np.ndarray,
         robot_model: str,
         transformer: CoordinateTransformer,
@@ -531,41 +717,87 @@ class ExtendedPartitioner(BasePartitioner):
         map_data: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        有新增区域：完整处理流程
+        有新增区域：threshold 线分界方案
+
+        1. Triton 推理获取 threshold_list（兼容无 Triton）
+        2. 过滤 threshold（跳过旧区域内的线）
+        3. 用 threshold 切割新区域 → 合并/新房间
+        4. 区域生长 + 重编号
+        5. 三类房间分别处理（未变化/合并过/新房间）
+        6. Graph/Colors 最小改动 + DFS 排序 + 序列化
         """
         new_region_count = int(new_regions_map.max())
         logger.info(f"检测到 {new_region_count} 个新增区域")
+        h, w = old_label_map.shape[:2]
 
-        # step1: 检测门槛
-        label_map = self.assign_new_regions(old_label_map, new_regions_map)
 
-        # step2: 门口拆分 + 区域生长
-        label_map = self.extend_pixel(label_map, grid_map)
+        # step1: Triton 推理获取 threshold_list（兼容无 Triton）
+        threshold_list = []
+        if self.inferencer and self.inferencer.is_ready():
+            tensor = self._prepare_tensor(map_data["input_img"], map_data)
+            raw_output = self.inferencer.run(tensor)
+            self.postprocessor.max_extend = 5.0
+            threshold_result = self.postprocessor._build_threshold_mask(
+                raw_output, map_data["cleaned_img"], map_data
+            )
+            threshold_list = threshold_result.get("threshold_list", [])
+            logger.info(f"Triton 推理: {len(threshold_list)} 条 threshold 线")
 
-        # step3: 重编号
-        label_map = self._relabel(label_map)
 
-        # step4: 建立新旧房间映射
-        old_room_mapping = self._build_old_room_mapping(
-            old_label_map, label_map, old_rooms_data
+        # step2: 过滤 threshold（跳过两端都在旧区域内的线）
+        if threshold_list:
+            filtered_mask = self._filter_thresholds(threshold_list, old_label_map, gray)
+        else:
+            filtered_mask = np.zeros((h, w), dtype=np.uint8)
+
+        # step3: 用 threshold 切割新区域 → 合并/新房间
+        new_contours, charge_room_id_list = self._classify_new_regions(
+            old_label_map, old_contours, grid_map, filtered_mask
         )
+        target_idx = len(old_contours)-1
+        new_contours = self._get_shared_edge_polygons(new_contours, (h, w), target_idx)
 
-        # step5: 构建分区轮廓
-        room_polygons = self.postprocessor._convert_to_polygons(map_img, label_map)
-        contours = [
-            np.asarray(polygon, dtype=np.int32).reshape(-1, 1, 2)
-            for polygon in room_polygons
-        ]
+        # # debug 
+        # draw_img = cv2.cvtColor(grid_map, cv2.COLOR_GRAY2BGR) if grid_map.ndim == 2 else grid_map.copy()
+        # for idx, contour in enumerate(new_contours):
+        #     # 使用确定性颜色，避免循环内随机与重复 import
+        #     color = ((37 * idx) % 256, (97 * idx) % 256, (157 * idx) % 256)
+        #     cv2.drawContours(draw_img, [contour], -1, color, 1)
+        # cv2.imwrite("./dataset/debug/2_new_contours.png", draw_img)
 
-        # step6: 轮廓外扩
+        # step4: 基于 charge_room_id_list 外扩
         expander = ContourExpander(self.config)
-        contours = expander.expand(contours, map_img)
+        contours = new_contours.copy()
+        for charge_room_id in charge_room_id_list:
+            contours[charge_room_id] = expander.contour_expand(new_contours[charge_room_id], map_img)
 
-        # step7: 邻接图 + 着色
+        # debug 
+        # draw_img = cv2.cvtColor(map_img, cv2.COLOR_BGR2RGB) if map_img.ndim == 2 else map_img.copy()
+        # for idx, contour in enumerate(contours):
+        #     # 使用确定性颜色，避免循环内随机与重复 import
+        #     color = ((37 * idx) % 256, (97 * idx) % 256, (157 * idx) % 256)
+        #     cv2.drawContours(draw_img, [contour], -1, color, 1)
+        # cv2.imwrite("./dataset/debug/3_contours.png", draw_img)
+        
+        # step5: 邻接图 + 着色（最小改动）
         graph = graph_builder.build_graph(contours, gray)
-        colors = graph_builder.assign_colors(graph)
+        # 旧房间保留旧颜色，新房间分配新颜色，最后修复冲突
+        old_colors: Dict[int, int] = {}
+        for idx in range(len(contours)):
+            if idx <= target_idx:
+                color = old_rooms_data[idx].get("colorType", None)
+                if color is None:
+                    color = graph_builder.assign_color_for_room(
+                        idx, graph, old_colors
+                    )
+                old_colors[idx] = color
+            else:
+                old_colors[idx] = graph_builder.assign_color_for_room(
+                    idx, graph, old_colors
+                )
+        colors = self._fix_color_conflicts(graph, old_colors, graph_builder)
 
-        # step8: DFS 排序
+        # step6: DFS 排序
         charge_pixel = self._get_charge_pixel(map_data, transformer)
         start = graph_builder.find_start_room(
             contours, charge_pixel if charge_pixel else (0, 0),
@@ -581,13 +813,23 @@ class ExtendedPartitioner(BasePartitioner):
 
         sorted_contours = [contours[i] for i in order]
 
-        # step9: 序列化（保留旧房间 id/name/groundMaterial，新房间分配新值）
+        # debug 
+        # draw_img = cv2.cvtColor(map_img, cv2.COLOR_BGR2RGB) if map_img.ndim == 2 else map_img.copy()
+        # for idx, contour in enumerate(sorted_contours):
+        #     # 使用确定性颜色，避免循环内随机与重复 import
+        #     color = ((37 * idx) % 256, (97 * idx) % 256, (157 * idx) % 256)
+        #     cv2.drawContours(draw_img, [contour], -1, color, 1)
+        # cv2.imwrite("./dataset/debug/4_sorted_contours.png", draw_img)
+
+
+
+        # step7: 序列化（三类房间分别处理）
         rooms_data = self.serialize_contours(
             sorted_contours, graph, colors, order,
-            transformer, old_rooms_data, old_room_mapping,
+            transformer, old_rooms_data, charge_room_id_list
         )
 
-        # step10: 标记点 (K20)
+        # step8: 标记点 (K20)
         landmarks_data: List[Dict[str, Any]] = []
         if robot_model == "S-K20PRO":
             marker_polygons = self._get_marker_polygons(map_data)
@@ -599,7 +841,7 @@ class ExtendedPartitioner(BasePartitioner):
                 marker_polygons=marker_polygons,
             )
 
-        # step11: 组装输出
+        # step9: 组装输出
         labels = {
             "version": self.config.get(
                 "labels_version",
@@ -611,7 +853,7 @@ class ExtendedPartitioner(BasePartitioner):
 
         logger.info(
             f"扩展分区完成: {len(rooms_data)} 个房间 "
-            f"(新增 {len(rooms_data) - len(old_rooms_data)} 个), "
+            f"(新增 {len(rooms_data) - len(old_rooms_data)} 个, "
             f"{len(landmarks_data)} 个标记点"
         )
         return labels

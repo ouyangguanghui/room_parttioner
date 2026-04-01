@@ -15,11 +15,6 @@ def get_room_index_by_id(rooms_data: List[Dict[str, Any]], room_id: str) -> int:
             return i
     return -1
 
-
-def find_room_index_by_id(rooms_data: List[Dict[str, Any]], room_id: str) -> int:
-    """兼容旧命名：等价于 get_room_index_by_id。"""
-    return get_room_index_by_id(rooms_data, room_id)
-
 def split_labels_data(labels: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """分割房间数据和标记点数据。"""
     rooms_data = [d for d in labels['data'] if 'ROOM' in d.get('id', '')]

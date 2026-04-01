@@ -203,13 +203,13 @@ class TestContoursToLabelMap:
         lm[5:20, 5:20] = 1
         lm[5:20, 25:40] = 2
         contours = AutoPartitioner._extract_contours(lm)
-        new_lm_free, new_lm = AutoPartitioner._contours_to_label_map(contours, np.full((50, 50), 255, dtype=np.uint8), (50, 50))
-        assert new_lm_free.max() >= 2
+        new_lm = AutoPartitioner._contours_to_label_map(contours, np.full((50, 50), 255, dtype=np.uint8), (50, 50))
+        assert new_lm.max() >= 2
 
     def test_empty_contours(self):
-        result_free, result = AutoPartitioner._contours_to_label_map([], np.full((10, 10), 255, dtype=np.uint8), (10, 10))
-        assert result_free.max() == 0
-        assert result_free.shape == (10, 10)
+        result = AutoPartitioner._contours_to_label_map([], np.full((10, 10), 255, dtype=np.uint8), (10, 10))
+        assert result.max() == 0
+        assert result.shape == (10, 10)
 
 
 # ==================== TestToGray ====================

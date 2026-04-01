@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Tuple
 
 import numpy as np
 import cv2
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPolygon
 from shapely.ops import unary_union
 
 from app.utils.coordinate import CoordinateTransformer
@@ -23,7 +23,7 @@ from app.core.errors import (
 )
 from app.utils.geometry_ops import (
     split_labels_data,
-    find_room_index_by_id,
+    get_room_index_by_id,
     flatten_geometry,
 )
 
@@ -60,7 +60,7 @@ class ManualMerger:
         if not all(room_id in [room["id"] for room in rooms_data] for room_id in room_merge_list):
             raise RoomIndexOutOfRangeError()
 
-        return [find_room_index_by_id(rooms_data, room_id) for room_id in room_merge_list]
+        return [get_room_index_by_id(rooms_data, room_id) for room_id in room_merge_list]
 
     # ==================== 像素级合并 ====================
 
@@ -188,23 +188,48 @@ class ManualMerger:
         keep_idx = roomid_index_list[0]
         remove_indices = set(roomid_index_list[1:])
 
-        # 收集所有待合并房间的 Polygon
-        polygons = []
+        # 收集并修复待合并房间的 Polygon，避免后续 union 因无效几何而异常分裂
+        polygons: List[Polygon] = []
         for idx in roomid_index_list:
             geom = rooms_data[idx]['geometry']
             pts = [(geom[i], geom[i + 1]) for i in range(0, len(geom) - 1, 2)]
             # 去掉闭合尾点
             if len(pts) >= 2 and pts[0] == pts[-1]:
                 pts = pts[:-1]
-            polygons.append(Polygon(pts))
+            poly = Polygon(pts)
+            if poly.is_empty:
+                continue
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                continue
+            if isinstance(poly, MultiPolygon):
+                polygons.extend([g for g in poly.geoms if not g.is_empty])
+            elif isinstance(poly, Polygon):
+                polygons.append(poly)
+
+        if not polygons:
+            raise InvalidParameterError("待合并房间几何无效，无法执行合并")
+
+        logger.info(f">>>> polygons: {polygons}")
 
         # Shapely union
         merged = unary_union(polygons)
+        logger.info(f">>>> merged: {merged}")
 
-        # 处理 union 结果
+        # 处理 union 结果:
+        # 1) MultiPolygon 不能直接“取最大面积”，否则会丢区域；
+        # 2) 对点接触/微小缝隙做一次极小闭运算，尽量得到单连通外轮廓。
         if merged.geom_type == 'MultiPolygon':
-            # 取面积最大的
-            merged = max(merged.geoms, key=lambda g: g.area)
+            eps = 1e-4
+            merged = merged.buffer(eps).buffer(-eps)
+
+            if merged.geom_type == 'MultiPolygon':
+                # 回退策略：若闭运算后仍分裂，按面积并保留主要部分，避免直接异常中断流程
+                merged = max(merged.geoms, key=lambda g: g.area)
+
+        if merged.geom_type != 'Polygon':
+            raise InvalidParameterError("合并后几何类型异常，无法提取外轮廓")
 
         # 提取外轮廓坐标（去掉闭合尾点）
         merged_coords = list(merged.exterior.coords)[:-1]

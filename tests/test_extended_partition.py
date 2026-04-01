@@ -90,126 +90,6 @@ class TestInit:
         assert ep.merge_ratio_threshold == 0.8
 
 
-# ==================== TestSplitByDoorway ====================
-
-class TestSplitByDoorway:
-    def test_no_split_solid_region(self, ep):
-        """实心区域不应被分裂"""
-        lm = np.zeros((100, 100), dtype=np.int32)
-        lm[10:90, 10:90] = 1
-        gm = np.full((100, 100), 255, dtype=np.uint8)
-        result = ep.split_by_doorway(lm, gm)
-        # 应仍然只有 1 个区域
-        unique = set(result.flat) - {0}
-        assert len(unique) == 1
-
-    def test_narrow_passage_splits(self):
-        """窄通道连接的两个大区域应被分裂"""
-        ep = ExtendedPartitioner({"door_width": 10, "grow_iterations": 20})
-        lm = np.zeros((100, 200), dtype=np.int32)
-        # 左侧大区域
-        lm[10:90, 10:80] = 1
-        # 窄通道 (5px 宽)
-        lm[45:50, 80:120] = 1
-        # 右侧大区域
-        lm[10:90, 120:190] = 1
-        gm = np.full((100, 200), 255, dtype=np.uint8)
-        result = ep.split_by_doorway(lm, gm)
-        unique = set(result.flat) - {0}
-        assert len(unique) >= 2
-
-    def test_empty_map(self, ep):
-        lm = np.zeros((10, 10), dtype=np.int32)
-        gm = np.full((10, 10), 255, dtype=np.uint8)
-        result = ep.split_by_doorway(lm, gm)
-        assert result.max() == 0
-
-
-# ==================== TestGrowUnassigned ====================
-
-class TestGrowUnassigned:
-    def test_fills_gap(self, ep):
-        """两个房间之间的小间隙应被填充"""
-        lm = np.zeros((20, 40), dtype=np.int32)
-        lm[2:18, 2:15] = 1
-        lm[2:18, 17:38] = 2  # 2px gap at x=15-17
-        gm = np.full((20, 40), 255, dtype=np.uint8)
-
-        result = ep.grow_unassigned(lm, gm)
-        # gap 区域应被填充
-        gap_values = result[5, 15:17]
-        assert all(v > 0 for v in gap_values)
-
-    def test_no_unassigned(self, ep):
-        """无未分配像素时返回原图"""
-        lm = np.ones((10, 10), dtype=np.int32)
-        gm = np.full((10, 10), 255, dtype=np.uint8)
-        result = ep.grow_unassigned(lm, gm)
-        np.testing.assert_array_equal(result, lm)
-
-    def test_respects_walls(self, ep):
-        """墙壁像素不应被填充"""
-        lm = np.zeros((20, 20), dtype=np.int32)
-        lm[2:8, 2:8] = 1
-        gm = np.zeros((20, 20), dtype=np.uint8)  # 全墙壁
-        gm[2:8, 2:8] = 255  # 只有房间是自由空间
-
-        result = ep.grow_unassigned(lm, gm)
-        # 墙壁区域应仍为 0
-        assert result[0, 0] == 0
-        assert result[15, 15] == 0
-
-    def test_competing_pixel_prefers_lower_label(self):
-        """竞争像素应稳定分配给较小 label，避免遍历顺序抖动。"""
-        ep = ExtendedPartitioner({"grow_iterations": 1, "wall_threshold": 128})
-        lm = np.zeros((7, 7), dtype=np.int32)
-        lm[3, 2] = 1
-        lm[3, 4] = 2
-        gm = np.full((7, 7), 255, dtype=np.uint8)
-
-        result = ep.grow_unassigned(lm, gm)
-        assert result[3, 3] == 1
-
-
-# ==================== TestExtendPixel ====================
-
-class TestExtendPixel:
-    def test_combines_split_and_grow(self, ep):
-        """extend_pixel 应依次执行 split + grow"""
-        lm = np.zeros((20, 20), dtype=np.int32)
-        lm[2:18, 2:18] = 1
-        gm = np.full((20, 20), 255, dtype=np.uint8)
-
-        with patch.object(ep, "split_by_doorway") as mock_split, \
-             patch.object(ep, "grow_unassigned") as mock_grow:
-            mock_split.return_value = lm
-            mock_grow.return_value = lm
-            ep.extend_pixel(lm, gm)
-            mock_split.assert_called_once()
-            mock_grow.assert_called_once()
-
-    def test_extend_alias(self, ep):
-        """extend() 应等价于 extend_pixel()"""
-        lm = np.zeros((10, 10), dtype=np.int32)
-        gm = np.full((10, 10), 255, dtype=np.uint8)
-        with patch.object(ep, "extend_pixel") as mock_ext:
-            mock_ext.return_value = lm
-            ep.extend(lm, gm)
-            mock_ext.assert_called_once_with(lm, gm)
-
-    def test_extend_pixel_is_idempotent(self):
-        """同一输入重复执行应稳定，不应持续漂移。"""
-        ep = ExtendedPartitioner({"grow_iterations": 10, "wall_threshold": 128})
-        lm = np.zeros((20, 40), dtype=np.int32)
-        lm[2:18, 2:15] = 1
-        lm[2:18, 17:38] = 2
-        gm = np.full((20, 40), 255, dtype=np.uint8)
-
-        once = ep.extend_pixel(lm, gm)
-        twice = ep.extend_pixel(once, gm)
-        np.testing.assert_array_equal(once, twice)
-
-
 # ==================== TestRegionGrow ====================
 
 class TestRegionGrow:
@@ -371,61 +251,6 @@ class TestClassifyRegion:
         assert target == 1
 
 
-# ==================== TestAssignNewRegions ====================
-
-class TestAssignNewRegions:
-    def test_merge_assignment(self, ep):
-        """小区域应被合并到相邻房间"""
-        lm = np.zeros((50, 50), dtype=np.int32)
-        lm[5:25, 5:25] = 1
-
-        new_regions = np.zeros((50, 50), dtype=np.int32)
-        new_regions[15:20, 25:28] = 1  # 紧贴房间 1 的小区域
-
-        with patch.object(ep, "classify_region", return_value=("merge", 1)):
-            result = ep.assign_new_regions(lm, new_regions)
-            assert result[17, 26] == 1  # 应被合并到房间 1
-
-    def test_new_room_assignment(self, ep):
-        """大区域应获得新 label"""
-        lm = np.zeros((50, 50), dtype=np.int32)
-        lm[5:20, 5:20] = 1
-
-        new_regions = np.zeros((50, 50), dtype=np.int32)
-        new_regions[30:45, 30:45] = 1
-
-        with patch.object(ep, "classify_region", return_value=("new", 0)):
-            result = ep.assign_new_regions(lm, new_regions)
-            new_val = result[35, 35]
-            assert new_val == 2  # 新 label = max(1) + 1 = 2
-
-    def test_no_new_regions(self, ep):
-        """无新区域时返回原 label_map"""
-        lm = np.ones((10, 10), dtype=np.int32)
-        new_regions = np.zeros((10, 10), dtype=np.int32)
-
-        result = ep.assign_new_regions(lm, new_regions)
-        np.testing.assert_array_equal(result, lm)
-
-    def test_mixed_assignments(self, ep):
-        """混合场景：部分合并 + 部分新建"""
-        lm = np.zeros((60, 60), dtype=np.int32)
-        lm[5:25, 5:25] = 1
-
-        new_regions = np.zeros((60, 60), dtype=np.int32)
-        new_regions[15:20, 25:28] = 1  # 区域 1: 小, 紧贴
-        new_regions[40:55, 40:55] = 2  # 区域 2: 大, 远离
-
-        def mock_classify(mask, label_map):
-            if mask[17, 26]:
-                return ("merge", 1)
-            return ("new", 0)
-
-        with patch.object(ep, "classify_region", side_effect=mock_classify):
-            result = ep.assign_new_regions(lm, new_regions)
-            assert result[17, 26] == 1  # 合并到房间 1
-            assert result[45, 45] == 2  # 新房间 label=2
-
 
 # ==================== TestBuildOldRoomMapping ====================
 
@@ -552,6 +377,101 @@ class TestSerializeContours:
         assert result[1]["graph"] == [0]
 
 
+# ==================== TestFilterThresholds ====================
+
+class TestFilterThresholds:
+    def test_skips_lines_inside_old_rooms(self, ep):
+        """两端都在旧房间内的 threshold 线应被跳过（old_label_map > 0 的像素被过滤）"""
+        old_lm = np.zeros((50, 50), dtype=np.int32)
+        old_lm[10:40, 10:40] = 1
+        gray = np.full((50, 50), 255, dtype=np.uint8)
+
+        # 线段两端都在旧房间内
+        threshold_list = [((20, 20), (30, 30))]
+        mask = ep._filter_thresholds(threshold_list, old_lm, gray)
+        assert mask.max() == 0  # 旧房间区域内的像素全被过滤
+
+    def test_keeps_lines_crossing_boundary(self, ep):
+        """线段穿过旧房间边界时，旧房间外且自由空间的部分应被保留"""
+        old_lm = np.zeros((50, 50), dtype=np.int32)
+        old_lm[10:25, 10:25] = 1
+        gray = np.full((50, 50), 255, dtype=np.uint8)  # 全自由空间
+
+        # 一端在旧房间内 (15,15)，一端在外 (35,35)
+        threshold_list = [((15, 15), (35, 35))]
+        mask = ep._filter_thresholds(threshold_list, old_lm, gray)
+        assert mask.max() == 255  # 旧房间外的部分应保留
+
+    def test_empty_threshold_list(self, ep):
+        """空 threshold_list 应返回全零 mask"""
+        old_lm = np.zeros((50, 50), dtype=np.int32)
+        gray = np.full((50, 50), 255, dtype=np.uint8)
+        mask = ep._filter_thresholds([], old_lm, gray)
+        assert mask.max() == 0
+
+
+# ==================== TestClassifyNewRegions ====================
+
+class TestClassifyNewRegions:
+    def test_merge_to_adjacent_old_room(self):
+        """新区域直接接触旧房间（无 threshold 隔开）应合并"""
+        ep = ExtendedPartitioner({"wall_threshold": 128, "min_new_region_area": 5, "min_room_area": 0.01})
+        old_lm = np.zeros((50, 50), dtype=np.int32)
+        old_lm[10:30, 10:25] = 1  # 旧房间
+        old_contours = ExtendedPartitioner._extract_contours(old_lm)
+
+        grid_map = np.full((50, 50), 255, dtype=np.uint8)
+        filtered_mask = np.zeros((50, 50), dtype=np.uint8)
+
+        # 新区域紧贴旧房间右侧 (x=25:35)
+        # old_lm 在 x=25:35 为 0, grid_map 为 255, filtered_mask 为 0
+        result_contours, room_id_list = ep._classify_new_regions(
+            old_lm, old_contours, grid_map, filtered_mask
+        )
+        assert 0 in room_id_list  # 旧房间 idx=0 被合并（old_contours[0]）
+        assert len(result_contours) >= 1
+
+    def test_new_room_when_threshold_separates(self):
+        """threshold 隔开的新区域应成为新房间"""
+        ep = ExtendedPartitioner({"wall_threshold": 128, "min_new_region_area": 5, "min_room_area": 0.01})
+        old_lm = np.zeros((50, 50), dtype=np.int32)
+        old_lm[10:30, 10:20] = 1  # 旧房间
+        old_contours = ExtendedPartitioner._extract_contours(old_lm)
+
+        # 只在旧房间右侧和 threshold 右侧有自由空间
+        grid_map = np.zeros((50, 50), dtype=np.uint8)
+        grid_map[10:30, 10:40] = 255  # 自由空间覆盖旧房间和右侧
+
+        # threshold 在 x=20:23 画一条竖线（3px宽），完全覆盖 y=10:30
+        filtered_mask = np.zeros((50, 50), dtype=np.uint8)
+        filtered_mask[10:30, 20:23] = 255  # threshold 线
+
+        result_contours, room_id_list = ep._classify_new_regions(
+            old_lm, old_contours, grid_map, filtered_mask
+        )
+        # 新区域被 threshold 隔开，应成为新房间（result_contours 比 old_contours 多）
+        assert len(result_contours) > len(old_contours)
+
+    def test_merge_picks_old_room_with_max_contact(self):
+        """同时接触多个旧房间时，应合并到接触像素最多的房间。"""
+        ep = ExtendedPartitioner({"wall_threshold": 128, "min_new_region_area": 5, "min_room_area": 0.01})
+        old_lm = np.zeros((60, 80), dtype=np.int32)
+        old_lm[10:50, 10:20] = 1
+        old_lm[10:20, 30:40] = 2
+        old_contours = ExtendedPartitioner._extract_contours(old_lm)
+
+        grid_map = np.zeros((60, 80), dtype=np.uint8)
+        # 新区域中间桥接：与房间1接触 40px，与房间2接触 10px
+        grid_map[10:50, 20:30] = 255
+        filtered_mask = np.zeros((60, 80), dtype=np.uint8)
+
+        result_contours, room_id_list = ep._classify_new_regions(
+            old_lm, old_contours, grid_map, filtered_mask
+        )
+        assert 0 in room_id_list  # old_contours[0] (旧房间1) 被合并
+        assert len(result_contours) == len(old_contours)  # 没有新房间，只是合并
+
+
 # ==================== TestRelabel ====================
 
 class TestRelabel:
@@ -582,10 +502,9 @@ class TestStaticUtils:
     def test_contours_to_label_map(self):
         cnt = np.array([[[5, 5]], [[15, 5]], [[15, 15]], [[5, 15]]], dtype=np.int32)
         map_img = np.full((20, 20), 255, dtype=np.uint8)
-        lm_free, lm = ExtendedPartitioner._contours_to_label_map([cnt], map_img, (20, 20))
+        lm = ExtendedPartitioner._contours_to_label_map([cnt], map_img, (20, 20))
         assert lm.max() == 1
         assert lm[10, 10] == 1
-        assert lm_free[10, 10] == 1
 
     def test_to_gray_passthrough(self):
         gray = np.full((10, 10), 128, dtype=np.uint8)
@@ -672,7 +591,7 @@ class TestProcess:
     def test_with_new_regions(
         self, ep, mock_transformer, mock_graph_builder, mock_landmark_builder
     ):
-        """有新区域时应调用 assign_new_regions + extend_pixel"""
+        """有新区域时应调用 _process_with_new_regions"""
         map_img = np.full((30, 30), 255, dtype=np.uint8)
         cnt = np.array([[[5, 5]], [[20, 5]], [[20, 20]], [[5, 20]]], dtype=np.int32)
         mock_transformer.rooms_data_to_contours.return_value = [cnt]
@@ -694,25 +613,25 @@ class TestProcess:
         new_regions = np.zeros((30, 30), dtype=np.int32)
         new_regions[25:29, 25:29] = 1  # 一个新区域
 
-        lm = np.zeros((30, 30), dtype=np.int32)
-        lm[5:20, 5:20] = 1
+        fake_result = {
+            "version": "v4.0.2",
+            "uuid": "test-uuid",
+            "data": [
+                {"name": "A", "id": "ROOM_001", "type": "polygon",
+                 "geometry": [0, 0, 1, 0, 1, 1, 0, 1, 0, 0],
+                 "colorType": 0, "graph": [], "groundMaterial": None},
+            ],
+        }
 
         with patch.object(ep, "detect_new_regions", return_value=new_regions), \
-             patch.object(ep, "assign_new_regions", return_value=lm) as mock_assign, \
-             patch.object(ep, "extend_pixel", return_value=lm) as mock_ext, \
-             patch("app.services.extended_partition.ContourExpander") as MockExp:
-
-            mock_exp = MagicMock()
-            mock_exp.expand.return_value = [cnt]
-            MockExp.return_value = mock_exp
+             patch.object(ep, "_process_with_new_regions", return_value=fake_result) as mock_proc:
 
             result = ep.process(
                 map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 
-        mock_assign.assert_called_once()
-        mock_ext.assert_called_once()
+        mock_proc.assert_called_once()
         assert len(result["data"]) > 0
 
     def test_k20pro_landmarks(
@@ -743,23 +662,25 @@ class TestProcess:
         new_regions = np.zeros((30, 30), dtype=np.int32)
         new_regions[25:29, 25:29] = 1  # 一个新区域
 
-        lm = np.zeros((30, 30), dtype=np.int32)
-        lm[5:20, 5:20] = 1
+        # _process_with_new_regions 内部会处理 landmarks
+        fake_result = {
+            "version": "v4.0.2",
+            "uuid": "k20-uuid",
+            "data": [
+                {"name": "A", "id": "ROOM_001", "type": "polygon",
+                 "geometry": [0, 0, 1, 0, 1, 1, 0, 1, 0, 0],
+                 "colorType": 0, "graph": [], "groundMaterial": None},
+                {"type": "pose", "id": "PLATFORM_LANDMARK_001"},
+            ],
+        }
 
         with patch.object(ep, "detect_new_regions", return_value=new_regions), \
-             patch.object(ep, "assign_new_regions", return_value=lm), \
-             patch.object(ep, "extend_pixel", return_value=lm), \
-             patch("app.services.extended_partition.ContourExpander") as MockExp:
-
-            mock_exp = MagicMock()
-            mock_exp.expand.return_value = [cnt]
-            MockExp.return_value = mock_exp
+             patch.object(ep, "_process_with_new_regions", return_value=fake_result):
 
             result = ep.process(
                 map_data, mock_transformer,
                 mock_graph_builder, mock_landmark_builder,
             )
 
-        mock_landmark_builder.generate_landmarks.assert_called_once()
         has_landmark = any(d.get("type") == "pose" for d in result["data"])
         assert has_landmark

@@ -180,7 +180,7 @@ tests/
 ├── test_inferencer.py          # Triton 推理
 ├── test_triton_client.py       # Triton 客户端
 ├── test_preprocessor.py        # 前处理
-├── test_postpross.py           # 后处理
+├── test_postprocessor.py        # 后处理
 ├── test_geometry_ops.py        # 几何工具
 └── test_s3_loader.py           # S3 加载
 ```
