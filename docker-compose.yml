@@ -1,18 +1,40 @@
 services:
   room-partitioner:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: room-partitioner:latest
+    container_name: room-partitioner
     ports:
       - "8000:8000"
-    volumes:
-      - ./config:/app/config
+    init: true
     restart: unless-stopped
-    environment:
-      - MIN_ROOM_AREA=1.0
-      - WALL_THRESHOLD=128
-      - RESOLUTION=0.05
-      - TRITON_URL=triton-server:8001
-      - MODEL_NAME=room_seg
-      - MODEL_VERSION=
-      - TRITON_PROTOCOL=grpc
-      - INPUT_NAME=input
-      - OUTPUT_NAME=output
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - partitioner-net
+
+networks:
+  partitioner-net:
+    driver: bridge

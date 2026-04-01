@@ -7,4 +7,3 @@ tritonclient[all]>=2.34
 pyyaml>=6.0
 boto3>=1.26
 shapely>=2.0
-matplotlib>=3.5

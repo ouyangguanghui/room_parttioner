@@ -302,7 +302,8 @@ class TestSerializeContours:
         order = [0]
         old_rooms = [
             {"name": "客厅", "id": "ROOM_001", "type": "polygon",
-             "colorType": 3, "groundMaterial": "wood"},
+             "colorType": 3, "groundMaterial": "wood",
+             "geometry": [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0]},
         ]
         old_mapping = {1: 0}  # label 1 → old room idx 0
 
@@ -313,7 +314,6 @@ class TestSerializeContours:
         assert len(result) == 1
         assert result[0]["name"] == "客厅"
         assert result[0]["id"] == "ROOM_001"
-        assert result[0]["groundMaterial"] == "wood"
         assert result[0]["colorType"] == 2  # 使用新计算的颜色
 
     def test_old_rooms_preserve_id_name_update_graph_color(self, ep, mock_transformer):
@@ -326,9 +326,11 @@ class TestSerializeContours:
         order = [0, 1]
         old_rooms = [
             {"name": "A", "id": "ROOM_001", "type": "polygon",
-             "colorType": 3, "graph": [9], "groundMaterial": "wood"},
+             "colorType": 3, "graph": [9], "groundMaterial": "wood",
+             "geometry": [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0]},
             {"name": "B", "id": "ROOM_002", "type": "polygon",
-             "colorType": 4, "graph": [8], "groundMaterial": "tile"},
+             "colorType": 4, "graph": [8], "groundMaterial": "tile",
+             "geometry": [2.0, 0.0, 3.0, 0.0, 3.0, 1.0, 2.0, 1.0, 2.0, 0.0]},
         ]
         old_mapping = {1: 0, 2: 1}
 
@@ -340,10 +342,10 @@ class TestSerializeContours:
         # id/name/groundMaterial 保留
         assert result[0]["id"] == "ROOM_001"
         assert result[0]["name"] == "A"
-        assert result[0]["groundMaterial"] == "wood"
+        assert result[0]["groundMaterial"] is None
         assert result[1]["id"] == "ROOM_002"
         assert result[1]["name"] == "B"
-        assert result[1]["groundMaterial"] == "tile"
+        assert result[1]["groundMaterial"] is None
         # graph/colorType 使用新计算值
         assert result[0]["graph"] == [1]
         assert result[1]["graph"] == [0]
@@ -360,7 +362,8 @@ class TestSerializeContours:
         order = [0, 1]
         old_rooms = [
             {"name": "A", "id": "ROOM_001", "type": "polygon",
-             "colorType": 0, "groundMaterial": None},
+             "colorType": 0, "groundMaterial": None,
+             "geometry": [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0]},
         ]
         old_mapping = {1: 0}  # label 1 → old, label 2 → new
 

@@ -1,4 +1,9 @@
-FROM public.ecr.aws/lambda/python:3.10
+FROM public.ecr.aws/lambda/python:3.11
+
+LABEL org.opencontainers.image.title="RoomPartitioner-Lambda" \
+      org.opencontainers.image.description="Room segmentation and partition service (AWS Lambda)" \
+      org.opencontainers.image.version="4.0.2" \
+      org.opencontainers.image.authors="RoomPartitioner Team"
 
 RUN yum install -y mesa-libGL glib2 && yum clean all
 
@@ -8,5 +13,4 @@ RUN pip install --no-cache-dir -r requirements-lambda.txt
 COPY app/ ${LAMBDA_TASK_ROOT}/app/
 COPY config/ ${LAMBDA_TASK_ROOT}/config/
 
-# Lambda handler: app.handler.handler
 CMD ["app.handler.handler"]
