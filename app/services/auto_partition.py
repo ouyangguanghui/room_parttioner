@@ -217,9 +217,9 @@ class AutoPartitioner(BasePartitioner):
         )
 
         # step5: 美化框 (s10)
-        if robot_model and "s10" in robot_model.lower():
-            self.set_beautifier_status(True)
-        _bbox_list, _threshold_list = self.beautify_contours(contours, map_img)
+        # if robot_model and "s10" in robot_model.lower():
+        #     self.set_beautifier_status(True)
+        # _bbox_list, _threshold_list = self.beautify_contours(contours, map_img)
 
         # step6: 标记点 (K20)
         landmarks_data = []
